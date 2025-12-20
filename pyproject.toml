@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "project-llm-chat"
+version = "0.1.0"
+description = "LLM chat training project"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "torch",
+    "transformers",
+    "pandas",
+    "pytorch-lightning",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["core*"]
