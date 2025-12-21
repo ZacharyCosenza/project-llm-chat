@@ -168,6 +168,8 @@ def train_gpt(
         devices = torch.cuda.device_count() if torch.cuda.is_available() else 1
     torch.set_float32_matmul_precision('medium')
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device == "cuda":
+        torch.cuda.empty_cache()
     
     # Logger
     logger = None
