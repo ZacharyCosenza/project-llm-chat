@@ -233,7 +233,7 @@ if __name__ == "__main__":
         dim=768,
         max_seq_len=2048,
         n_layers=2,
-        batch_size=32,
+        batch_size=2,
         max_steps=1000,
         smoke_test=False,
         wandb_name='test'
