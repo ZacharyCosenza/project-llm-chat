@@ -2,9 +2,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
+from pytorch_lightning.loggers import WandbLogger
 from torch.utils.data import DataLoader, Dataset
 import pandas as pd
 from transformers import AutoTokenizer
+import wandb
 
 # custom imports
 from core.dataloader import simple_dataloader, tokenizing_dataloader
@@ -46,7 +48,7 @@ class LightningGPT(pl.LightningModule):
     def __init__(self, vocab_size, dim=64, n_layers=2, n_heads=2, lr=1e-3,
                  train_dataloader=None, build_val_loader=None):
         super().__init__()
-        self.save_hyperparameters(ignore=['train_dataloader', 'val_dataloader', 'test_dataloader'])
+        self.save_hyperparameters(ignore=['train_dataloader', 'val_dataloader'])
         self.model = TinyGPT(vocab_size, dim, n_layers, n_heads)
         self.lr = lr
         self._train_dataloader = train_dataloader
@@ -59,16 +61,27 @@ class LightningGPT(pl.LightningModule):
         x, y, dataloader_state_dict = batch
         logits = self(x)  # [B, T-1, vocab]
         loss = F.cross_entropy(logits.reshape(-1, self.hparams.vocab_size), y.reshape(-1))
-        
+
+        # Calculate perplexity
+        perplexity = torch.exp(loss)
+
+        # Log metrics
         self.log('train_loss', loss, prog_bar=True, sync_dist=True)
+
         return loss
     
     def validation_step(self, batch, batch_idx):
         x, y = batch
         logits = self(x)
         loss = F.cross_entropy(logits.reshape(-1, self.hparams.vocab_size), y.reshape(-1))
-        
+
+        # Calculate perplexity
+        perplexity = torch.exp(loss)
+
+        # Log metrics
         self.log('val_loss', loss, prog_bar=True, sync_dist=True)
+        self.log('val_perplexity', perplexity, prog_bar=False, sync_dist=True)
+
         return loss
     
     def configure_optimizers(self):
@@ -94,11 +107,12 @@ def train_gpt(
     grad_clip=1.0,
     grad_accum_steps=1,
     devices=None,
-    smoke_test=False
+    smoke_test=False,
+    wandb_project="llm-chat",
+    wandb_name=None,
+    wandb_enabled=True
 ):
     """
-    Train TinyGPT with automatic multi-GPU or CPU support.
-
     Args:
         train_df: DataFrame with 'text' column
         val_df: Optional validation DataFrame
@@ -113,14 +127,35 @@ def train_gpt(
     if devices is None:
         devices = torch.cuda.device_count() if torch.cuda.is_available() else 1
     torch.set_float32_matmul_precision('medium')
-
-    # Determine device for dataloaders
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    tokenizer = AutoTokenizer.from_pretrained("gpt2")
-    tokenizer.pad_token = tokenizer.eos_token
+    # Initialize WandB logger with unified logging directory
+    logger = None
+    if wandb_enabled:
+        logger = WandbLogger(
+            project=wandb_project,
+            name=wandb_name,
+            log_model=True,
+            save_dir="logs",  # Unified logging directory
+            config={
+                "dim": dim,
+                "max_seq_len": max_seq_len,
+                "n_layers": n_layers,
+                "n_heads": n_heads,
+                "lr": lr,
+                "batch_size": batch_size,
+                "max_steps": max_steps,
+                "eval_every": eval_every,
+                "grad_clip": grad_clip,
+                "grad_accum_steps": grad_accum_steps,
+                "devices": devices,
+                "accelerator": accelerator,
+            }
+        )
 
     # Create custom dataloaders
+    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    tokenizer.pad_token = tokenizer.eos_token
     resuming = False
     meta_data = {}
     dataloader_resume_state_dict = None if not resuming else meta_data["dataloader_state_dict"]
@@ -130,31 +165,31 @@ def train_gpt(
     model = LightningGPT(vocab_size=tokenizer.vocab_size, dim=dim,
                         n_layers=n_layers, n_heads=n_heads, lr=lr,
                         train_dataloader=train_loader, build_val_loader=build_val_loader)
-        
+
     trainer = pl.Trainer(
-        max_steps=max_steps,
+        max_steps=max_steps if not smoke_test else 100,
         devices=devices,
         accelerator=accelerator,
         strategy="ddp" if devices > 1 else "auto",
         enable_progress_bar=True,
-        val_check_interval=eval_every,
-        limit_val_batches=None,
-        fast_dev_run=smoke_test,
+        val_check_interval=eval_every if not smoke_test else 2,
+        limit_val_batches=2 if smoke_test else None,
+        fast_dev_run=False,
         precision="bf16-mixed" if device == "cuda" else '32-true', # drop-in for the autocast
         gradient_clip_val=grad_clip if grad_clip > 0.0 else None,
-        accumulate_grad_batches=grad_accum_steps
+        accumulate_grad_batches=grad_accum_steps,
+        logger=logger,
+        default_root_dir="logs"  # Unified directory for all Lightning outputs
     )
 
     trainer.fit(model)
-    
-    return model, trainer
 
 if __name__ == "__main__":
 
     SMOKE = True
-
-    # Train on all available GPUs (or CPU)
-    model, trainer = train_gpt(
+    WANDB_NAME = 'test'
+    
+    train_gpt(
         dim=64,
         max_seq_len=128,
         n_layers=2,
@@ -163,7 +198,6 @@ if __name__ == "__main__":
         eval_every=250,
         grad_clip = 1.0, # gradient clipping value (0.0 = disabled)
         devices=None,
-        smoke_test=SMOKE
+        smoke_test=SMOKE,
+        wandb_name=WANDB_NAME
     )
-
-    print("Training complete!")

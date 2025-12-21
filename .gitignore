@@ -83,7 +83,6 @@ logs/
 *.sqlite
 *.sqlite3
 /data
-/lightning_logs
 
 # Other
 .cache/
