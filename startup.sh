@@ -7,4 +7,4 @@ python3.11 -m venv .venv
 source .venv/bin/activate
 
 python -m pip install --upgrade pip
-pip install numpy pandas matplotlib scikit-learn torch huggingface transformers hf_transfer lightning wandb
+pip install numpy pandas matplotlib scikit-learn torch huggingface transformers hf_transfer lightning wandb pyarrow
