@@ -2,7 +2,7 @@ from collections import deque
 import torch
 import os
 import pyarrow.parquet as pq
-from transformers import AutoTokenizer
+
 from core.dataset import list_parquet_files
 
 def is_ddp():
@@ -18,7 +18,7 @@ def get_dist_info():
     else:
         return False, 0, 0, 1
 
-def tokenizing_dataloader(B, T, split="train", device=None, resume_state=None, stream=True):
+def tokenizing_dataloader(tokenizer, B, T, split="train", device=None, resume_state=None, stream=True):
     """
     Load parquet files → tokenize → yield (x, y) batches with DDP support.
     
@@ -34,7 +34,6 @@ def tokenizing_dataloader(B, T, split="train", device=None, resume_state=None, s
     
     # Setup
     ddp, ddp_rank, _, ddp_world_size = get_dist_info()
-    tokenizer = AutoTokenizer.from_pretrained("gpt2")
     needed_tokens = B * T + 1
     token_buffer = deque()
     
@@ -79,7 +78,7 @@ def tokenizing_dataloader(B, T, split="train", device=None, resume_state=None, s
             while len(token_buffer) < needed_tokens:
                 texts, (pq_idx, rg_idx) = next(batches)
                 for text in texts:
-                    tokens = tokenizer.encode(text, add_special_tokens=True)
+                    tokens = tokenizer.encode(text, add_special_tokens=True, max_length=2048, truncation=True)
                     token_buffer.extend(tokens)
             
             # Pop exact tokens needed
@@ -99,7 +98,7 @@ def tokenizing_dataloader(B, T, split="train", device=None, resume_state=None, s
         # Only happens when stream=False and data exhausted
         return
 
-def simple_dataloader(B, T, split="train", device=None, stream=True):
+def simple_dataloader(tokenizer, B, T, split="train", device=None, stream=True):
     """Wrapper that only yields (x, y) without state."""
-    for x, y, _ in tokenizing_dataloader(B, T, split, device, stream=stream):
+    for x, y, _ in tokenizing_dataloader(tokenizer, B, T, split, device, stream=stream):
         yield x, y

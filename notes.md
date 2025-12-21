@@ -6,6 +6,11 @@ The major goal of this set of experiments is to learn more about the following (
 2. Engineering the LLM model to be somewhat interactive
 3. Evaluation of LLM models on tasks
 
+# TODO
+
+1. Add optimizer
+2. Add CORE eval
+
 # Estimation of number of iterations
 
 K suggests three methods of setting the number of iterations: (1) direct, (2) target FLOPS, (3) parameter to data ratio. Interestingly (according to Claude) the concept of epochs is not popular with these larger models so we'll ignore and only focus on iterations and assume the datasets are so large we don't get a change to revisit.
