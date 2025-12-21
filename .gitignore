@@ -88,3 +88,6 @@ logs/
 .cache/
 tmp/
 temp/
+
+# Keys
+keys.md

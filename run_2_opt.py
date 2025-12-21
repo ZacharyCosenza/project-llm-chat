@@ -99,7 +99,6 @@ class LightningGPT(pl.LightningModule):
         return loss
     
     def configure_optimizers(self):
-        # Separate parameter groups by type
         embedding_params = list(self.model.tok_emb.parameters()) + list(self.model.pos_emb.parameters())
         head_params = list(self.model.head.parameters())
         other_params = list(self.model.blocks.parameters()) + list(self.model.ln_f.parameters())
@@ -111,7 +110,6 @@ class LightningGPT(pl.LightningModule):
             {'params': other_params, 'lr': 0.02 * self.hparams.base_lr}
         ], betas=(0.8, 0.95), eps=1e-10, weight_decay=self.hparams.weight_decay)
         
-        # Scheduler
         def lr_lambda(current_step):
             max_steps = self.trainer.max_steps
             warmup_steps = int(self.hparams.warmup_ratio * max_steps)
@@ -230,10 +228,10 @@ def train_gpt(
 
 if __name__ == "__main__":
     train_gpt(
-        dim=64,
-        max_seq_len=128,
+        dim=768,
+        max_seq_len=2048,
         n_layers=2,
-        batch_size=16,
+        batch_size=32,
         max_steps=1000,
         smoke_test=False,
         wandb_name='test'

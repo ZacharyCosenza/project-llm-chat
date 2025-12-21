@@ -8,8 +8,8 @@ The major goal of this set of experiments is to learn more about the following (
 
 # TODO
 
-1. Add optimizer
-2. Add CORE eval
+- Add CORE eval
+- 
 
 # Estimation of number of iterations
 
@@ -35,4 +35,4 @@ Remember that attention masking is already used in training GPT-style models, so
 
 # Getting started
 
-Let's start understanding the datasets. In K's code the download process is kicked off using python -m nanochat.dataset -n num_shards so let's just copy that (this loads the pretraining data from Huggingface). Speaking of data, let's plan the overall size of the model. 
+Let's start understanding the datasets. In K's code the download process is kicked off using python -m nanochat.dataset -n num_shards so let's just copy that (this loads the pretraining data from Huggingface). Speaking of data, let's plan the overall size of the model. When starting, user should download the shards they need and store them as parquet files. I then went ahead and incorporated the major aspects of K's code into pytorch lightning because I find dealing with the multi-GPU process tedious. I have yet to scale up to the proper model size so it is unclear if the dataloaders have been implemented correctly but we will see. I also tried to use his distributed Muon optimizer with lightning but that required a full custom training step which I don't want to deal with quite yet. In it's place I had Claude extract out the underlying logic of the optimizer (basically splitting the LLM into slow and fast optimizations) and created a good baseline using AdamW. I am still trying to figure out how much we should abstract away from K's very low level implementation and still aline with Goal 2 above.
