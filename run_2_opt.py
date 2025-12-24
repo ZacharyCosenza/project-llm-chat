@@ -17,7 +17,7 @@ class TinyGPT(nn.Module):
             nn.TransformerEncoderLayer(
                 d_model=dim, 
                 nhead=n_heads, 
-                dim_feedforward=dim*4,
+                dim_feedforward=dim,
                 batch_first=True,
                 norm_first=True
             ) for _ in range(n_layers)
@@ -298,7 +298,7 @@ def train_gpt(
 
 if __name__ == "__main__":
 
-    depth = 2
+    depth = 20
     num_layers = depth
     model_dim = depth * 64 # aspect ratio 64 (usually this is varied from 64 -> 128 as model size increases)
     n_heads = max(1, (model_dim + 127) // 128) # head dim 128 (the division here is ceil div)
