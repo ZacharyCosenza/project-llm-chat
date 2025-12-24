@@ -57,15 +57,15 @@ class LightningGPT(pl.LightningModule):
     def __init__(self, vocab_size, dim=64, n_layers=2, n_heads=2,
                  base_lr=1e-3, weight_decay=0.01,
                  warmup_ratio=0.0, warmdown_ratio=0.2, final_lr_frac=0.0,
-                 train_dataloader=None, build_val_loader=None):
+                 train_dataloader=None, build_val_loader=None, max_seq_len=128, batch_size=32):
         super().__init__()
         self.save_hyperparameters(ignore=['train_dataloader', 'build_val_loader'])
-        
-        self.model = TinyGPT(vocab_size, dim, n_layers, n_heads)
+
+        self.model = TinyGPT(vocab_size, dim, n_layers, n_heads, max_seq_len)
         self._train_dataloader = train_dataloader
         self.build_val_loader = build_val_loader
-        max_seq_len = train_dataloader.max_seq_len
-        self.batch_size = train_dataloader.batch_size
+        self.max_seq_len = max_seq_len
+        self.batch_size = batch_size
         self.flops_per_token = self.model.estimate_flops(max_seq_len)
     
     def forward(self, x):
@@ -248,7 +248,9 @@ def train_gpt(
         warmup_ratio=warmup_ratio,
         warmdown_ratio=warmdown_ratio,
         train_dataloader=train_loader,
-        build_val_loader=build_val_loader
+        build_val_loader=build_val_loader,
+        max_seq_len=max_seq_len,
+        batch_size=batch_size
     )
 
     total_params = sum(p.numel() for p in model.parameters())
