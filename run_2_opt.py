@@ -316,7 +316,7 @@ def train_gpt(
         max_steps=max_steps,
         devices=devices,
         accelerator=accelerator,
-        strategy="ddp_spawn" if devices > 1 else "auto",
+        strategy="ddp" if devices > 1 else "auto",
         val_check_interval=eval_every,
         limit_val_batches=val_max_steps,
         fast_dev_run=smoke_test,
