@@ -328,7 +328,7 @@ if __name__ == "__main__":
 
     train_gpt(
         dim=model_dim,
-        max_seq_len=128 * 2, # 2048
+        max_seq_len=1024, # 2048
         n_layers=num_layers, # 20
         n_heads=n_heads,
         batch_size=32,
