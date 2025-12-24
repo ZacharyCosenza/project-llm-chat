@@ -347,7 +347,7 @@ if __name__ == "__main__":
     n_heads = max(1, (model_dim + 127) // 128) # head dim 128 (the division here is ceil div)
     n_kv_heads = n_heads # default is 1:1 GQA (Group Query Attention) ratio (i.e. GQA is disabled)
     max_seq_len = 1024
-    batch_size = 32
+    batch_size = 8
     tokens_per_fwdbwd = batch_size * max_seq_len # tokens per iteration for a single rank
     world_tokens_per_fwdbwd = tokens_per_fwdbwd * world_size # total tokens per iteration for all ranks
     grad_accum_steps = max(1, world_tokens_per_fwdbwd // (batch_size * max_seq_len))
