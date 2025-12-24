@@ -186,26 +186,34 @@ class LightningGPT(pl.LightningModule):
         return self._val_loader
 
 def train_gpt(
-    dim=64,
-    max_seq_len=128,
-    n_layers=2,
-    n_heads=2,
-    base_lr=1e-3,
-    weight_decay=0.01,
-    warmup_ratio=0.0,
-    warmdown_ratio=0.2,
     batch_size=32,
+    max_seq_len=128,
     max_steps=1000,
-    eval_every=250,
     val_max_steps=2,
-    grad_clip=1.0,
-    grad_accum_steps=1,
-    devices=None,
     smoke_test=False,
-    wandb_project="llm-chat",
-    wandb_name=None,
-    wandb_enabled=True
+    wandb_name=None
 ):
+    # Model architecture parameters
+    dim = 64
+    n_layers = 2
+    n_heads = 2
+
+    # Optimizer parameters
+    base_lr = 1e-3
+    weight_decay = 0.01
+    warmup_ratio = 0.0
+    warmdown_ratio = 0.2
+    final_lr_frac = 0.0
+
+    # Training parameters
+    eval_every = 250
+    grad_clip = 1.0
+    grad_accum_steps = 1
+    devices = None
+
+    # Logging parameters
+    wandb_project = "llm-chat"
+    wandb_enabled = True
     # Get distributed info (will be correct after DDP spawns processes)
     is_ddp, rank, local_rank, world_size = get_dist_info()
 
@@ -266,6 +274,7 @@ def train_gpt(
         weight_decay=weight_decay,
         warmup_ratio=warmup_ratio,
         warmdown_ratio=warmdown_ratio,
+        final_lr_frac=final_lr_frac,
         tokenizer=tokenizer,
         max_seq_len=max_seq_len,
         batch_size=batch_size
@@ -337,30 +346,23 @@ def train_gpt(
     return model, trainer
 
 if __name__ == "__main__":
-    # Get distributed info for computing batch sizes
-    # Note: In multi-GPU scenarios, this will be updated when DDP spawns processes
-    _, _, _, world_size = get_dist_info()
+    import argparse
 
-    depth = 20
-    num_layers = depth
-    model_dim = depth * 64 # aspect ratio 64 (usually this is varied from 64 -> 128 as model size increases)
-    n_heads = max(1, (model_dim + 127) // 128) # head dim 128 (the division here is ceil div)
-    n_kv_heads = n_heads # default is 1:1 GQA (Group Query Attention) ratio (i.e. GQA is disabled)
-    max_seq_len = 1024
-    batch_size = 8
-    tokens_per_fwdbwd = batch_size * max_seq_len # tokens per iteration for a single rank
-    world_tokens_per_fwdbwd = tokens_per_fwdbwd * world_size # total tokens per iteration for all ranks
-    grad_accum_steps = max(1, world_tokens_per_fwdbwd // (batch_size * max_seq_len))
+    parser = argparse.ArgumentParser(description="Train GPT model")
+    parser.add_argument("--batch_size", type=int, default=8, help="Batch size per rank")
+    parser.add_argument("--max_seq_len", type=int, default=1024, help="Maximum sequence length")
+    parser.add_argument("--max_steps", type=int, default=1000, help="Maximum training steps")
+    parser.add_argument("--val_max_steps", type=int, default=10, help="Maximum validation steps")
+    parser.add_argument("--smoke_test", action="store_true", help="Run smoke test (fast dev run)")
+    parser.add_argument("--wandb_name", type=str, default="test", help="Weights & Biases run name")
+
+    args = parser.parse_args()
 
     train_gpt(
-        dim=model_dim,
-        max_seq_len=max_seq_len, # 2048
-        n_layers=num_layers, # 20
-        n_heads=n_heads,
-        batch_size=batch_size,
-        grad_accum_steps=grad_accum_steps,
-        max_steps=1000,
-        val_max_steps=10,
-        smoke_test=False,
-        wandb_name='test'
+        batch_size=args.batch_size,
+        max_seq_len=args.max_seq_len,
+        max_steps=args.max_steps,
+        val_max_steps=args.val_max_steps,
+        smoke_test=args.smoke_test,
+        wandb_name=args.wandb_name
     )
