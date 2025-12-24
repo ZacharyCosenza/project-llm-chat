@@ -325,13 +325,20 @@ if __name__ == "__main__":
     model_dim = depth * 64 # aspect ratio 64 (usually this is varied from 64 -> 128 as model size increases)
     n_heads = max(1, (model_dim + 127) // 128) # head dim 128 (the division here is ceil div)
     n_kv_heads = n_heads # default is 1:1 GQA (Group Query Attention) ratio (i.e. GQA is disabled)
+    max_seq_len = 1024
+    batch_size = 32
+    tokens_per_fwdbwd = batch_size * world_size * max_seq_len # tokens per iteration for a single rank
+    world_tokens_per_fwdbwd = tokens_per_fwdbwd * world_size # total tokens per iteration for all ranks
+    grad_accum_steps = (batch_size * world_size) // world_tokens_per_fwdbwd
+    grad_accum_steps = 4
 
     train_gpt(
         dim=model_dim,
-        max_seq_len=1024, # 2048
+        max_seq_len=max_seq_len, # 2048
         n_layers=num_layers, # 20
         n_heads=n_heads,
-        batch_size=32,
+        batch_size=batch_size,
+        grad_accum_steps=grad_accum_steps,
         max_steps=1000,
         val_max_steps=10,
         smoke_test=False,
