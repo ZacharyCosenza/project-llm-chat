@@ -11,6 +11,7 @@ The major goal of this set of experiments is to learn more about the following (
 - Research KV caching
 - Research memory capacity requirements
 - Understand FLOPS / token calculation
+- Understanding of memory usage (weights, gradients, activations, data)
 
 # Estimation of number of iterations
 
