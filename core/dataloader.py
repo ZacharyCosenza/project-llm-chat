@@ -64,11 +64,11 @@ def tokenizing_dataloader(tokenizer, B, T, split="train", device=None, resume_st
             
             # Pop exact tokens needed
             tokens = [token_buffer.popleft() for _ in range(needed_tokens)]
-            
+
             # Create batch (only use pinned memory on CUDA)
-            use_pin = device == "cuda" and torch.cuda.is_available()
+            use_pin = device == "cuda"
             scratch = torch.tensor(tokens, dtype=torch.long, pin_memory=use_pin)
-            
+
             x = scratch[:-1].view(B, T).to(device, non_blocking=use_pin)
             y = scratch[1:].view(B, T).to(device, non_blocking=use_pin)
             

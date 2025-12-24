@@ -7,8 +7,6 @@ from transformers import AutoTokenizer
 from core.dataloader import simple_dataloader, tokenizing_dataloader
 from core.utils import print0, get_dist_info
 
-is_ddp, rank, local_rank, world_size = get_dist_info()
-
 class TinyGPT(nn.Module):
     def __init__(self, vocab_size=100, dim=64, n_layers=2, n_heads=2, max_seq_len=128):
         super().__init__()
@@ -57,16 +55,17 @@ class LightningGPT(pl.LightningModule):
     def __init__(self, vocab_size, dim=64, n_layers=2, n_heads=2,
                  base_lr=1e-3, weight_decay=0.01,
                  warmup_ratio=0.0, warmdown_ratio=0.2, final_lr_frac=0.0,
-                 train_dataloader=None, build_val_loader=None, max_seq_len=128, batch_size=32):
+                 tokenizer=None, max_seq_len=128, batch_size=32):
         super().__init__()
-        self.save_hyperparameters(ignore=['train_dataloader', 'build_val_loader'])
+        self.save_hyperparameters(ignore=['tokenizer'])
 
         self.model = TinyGPT(vocab_size, dim, n_layers, n_heads, max_seq_len)
-        self._train_dataloader = train_dataloader
-        self.build_val_loader = build_val_loader
+        self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
         self.batch_size = batch_size
         self.flops_per_token = self.model.estimate_flops(max_seq_len)
+        self._train_loader = None
+        self._val_loader = None
     
     def forward(self, x):
         return self.model(x)
@@ -77,6 +76,7 @@ class LightningGPT(pl.LightningModule):
         logits = self(x)
         loss = F.cross_entropy(logits.reshape(-1, self.hparams.vocab_size), y.reshape(-1))
 
+        _, _, _, world_size = get_dist_info()
         flops_so_far = self.flops_per_token * B * T * world_size * (self.global_step + 1)
         self.log('train_loss', loss, prog_bar=True, sync_dist=True)
         self.log('flops_so_far', flops_so_far, prog_bar=False, sync_dist=True)
@@ -158,10 +158,32 @@ class LightningGPT(pl.LightningModule):
         }
     
     def train_dataloader(self):
-        return self._train_dataloader
-    
+        # Lazy initialization: create dataloader after DDP has spawned processes
+        # This is called AFTER setup(), so self.device will be properly set by Lightning
+        if self._train_loader is None:
+            device = "cuda" if self.device.type == "cuda" else "cpu"
+            self._train_loader = tokenizing_dataloader(
+                self.tokenizer,
+                self.batch_size,
+                self.max_seq_len,
+                split="train",
+                device=device
+            )
+        return self._train_loader
+
     def val_dataloader(self):
-        return self.build_val_loader()
+        # Lazy initialization: create dataloader after DDP has spawned processes
+        # This is called AFTER setup(), so self.device will be properly set by Lightning
+        if self._val_loader is None:
+            device = "cuda" if self.device.type == "cuda" else "cpu"
+            self._val_loader = simple_dataloader(
+                self.tokenizer,
+                self.batch_size,
+                self.max_seq_len,
+                split="val",
+                device=device
+            )
+        return self._val_loader
 
 def train_gpt(
     dim=64,
@@ -184,6 +206,9 @@ def train_gpt(
     wandb_name=None,
     wandb_enabled=True
 ):
+    # Get distributed info (will be correct after DDP spawns processes)
+    is_ddp, rank, local_rank, world_size = get_dist_info()
+
     # Print distributed info
     print0("=== Training Configuration ===")
     print0(f"DDP Mode: {is_ddp}")
@@ -198,12 +223,7 @@ def train_gpt(
     print0(f"Devices: {devices}")
 
     torch.set_float32_matmul_precision('medium')
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    if device == "cuda":
-        torch.cuda.empty_cache()
-        get_max_memory = torch.cuda.max_memory_allocated if device == "cuda" else lambda: 0
-        print0(f"CUDA available, using device: {device}")
-    
+
     # Logger
     logger = None
     if wandb_enabled and not smoke_test:
@@ -221,15 +241,14 @@ def train_gpt(
                 "max_steps": max_steps,
             }
         )
-    
-    # Dataloaders
+
+    # Tokenizer setup (no CUDA calls here)
     print0("\n=== Loading Data ===")
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
     tokenizer.pad_token = tokenizer.eos_token
     print0(f"Tokenizer vocab size: {tokenizer.vocab_size}")
-    train_loader = tokenizing_dataloader(tokenizer, batch_size, max_seq_len, split="train", device=device)
-    build_val_loader = lambda: simple_dataloader(tokenizer, batch_size, max_seq_len, split="val", device=device)
     print0(f"Batch size: {batch_size}, Max sequence length: {max_seq_len}")
+    print0("Note: Dataloaders will be created lazily after DDP initialization")
     
     # Model
     print0("\n=== Model Configuration ===")
@@ -247,8 +266,7 @@ def train_gpt(
         weight_decay=weight_decay,
         warmup_ratio=warmup_ratio,
         warmdown_ratio=warmdown_ratio,
-        train_dataloader=train_loader,
-        build_val_loader=build_val_loader,
+        tokenizer=tokenizer,
         max_seq_len=max_seq_len,
         batch_size=batch_size
     )
@@ -266,7 +284,7 @@ def train_gpt(
     print0(f"Gradient accumulation steps: {grad_accum_steps}")
     print0(f"Gradient clipping: {grad_clip if grad_clip > 0 else 'None'}")
     print0(f"Strategy: {'ddp' if devices > 1 else 'auto'}")
-    print0(f"Precision: {'bf16-mixed' if device == 'cuda' else '32-true'}")
+    print0(f"Precision: {'bf16-mixed' if accelerator == 'gpu' else '32-true'}")
     print0(f"Smoke test: {smoke_test}")
 
     print0("\n=== Optimizer Settings ===")
@@ -302,7 +320,7 @@ def train_gpt(
         val_check_interval=eval_every,
         limit_val_batches=val_max_steps,
         fast_dev_run=smoke_test,
-        # precision="bf16-mixed" if device == "cuda" else '32-true',
+        precision="bf16-mixed" if accelerator == "gpu" else '32-true',
         gradient_clip_val=grad_clip if grad_clip > 0 else None,
         accumulate_grad_batches=grad_accum_steps,
         logger=logger,
@@ -312,13 +330,16 @@ def train_gpt(
     trainer.fit(model)
 
     print0("\n=== Training Complete ===")
-    if device == "cuda":
-        max_memory_mb = get_max_memory() / (1024 ** 2)
+    if torch.cuda.is_available():
+        max_memory_mb = torch.cuda.max_memory_allocated() / (1024 ** 2)
         print0(f"Peak GPU memory: {max_memory_mb:.2f} MB")
 
     return model, trainer
 
 if __name__ == "__main__":
+    # Get distributed info for computing batch sizes
+    # Note: In multi-GPU scenarios, this will be updated when DDP spawns processes
+    _, _, _, world_size = get_dist_info()
 
     depth = 20
     num_layers = depth
@@ -327,9 +348,9 @@ if __name__ == "__main__":
     n_kv_heads = n_heads # default is 1:1 GQA (Group Query Attention) ratio (i.e. GQA is disabled)
     max_seq_len = 1024
     batch_size = 32
-    tokens_per_fwdbwd = batch_size * world_size * max_seq_len # tokens per iteration for a single rank
+    tokens_per_fwdbwd = batch_size * max_seq_len # tokens per iteration for a single rank
     world_tokens_per_fwdbwd = tokens_per_fwdbwd * world_size # total tokens per iteration for all ranks
-    grad_accum_steps = (batch_size * world_size) // world_tokens_per_fwdbwd
+    grad_accum_steps = max(1, world_tokens_per_fwdbwd // (batch_size * max_seq_len))
 
     train_gpt(
         dim=model_dim,
@@ -340,6 +361,6 @@ if __name__ == "__main__":
         grad_accum_steps=grad_accum_steps,
         max_steps=1000,
         val_max_steps=10,
-        smoke_test=False,
+        smoke_test=True,
         wandb_name='test'
     )
