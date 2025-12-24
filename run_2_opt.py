@@ -7,6 +7,8 @@ from transformers import AutoTokenizer
 from core.dataloader import simple_dataloader, tokenizing_dataloader
 from core.utils import print0, get_dist_info
 
+is_ddp, rank, local_rank, world_size = get_dist_info()
+
 class TinyGPT(nn.Module):
     def __init__(self, vocab_size=100, dim=64, n_layers=2, n_heads=2, max_seq_len=128):
         super().__init__()
@@ -26,6 +28,17 @@ class TinyGPT(nn.Module):
         self.ln_f = nn.LayerNorm(dim)
         self.head = nn.Linear(dim, vocab_size, bias=False)
     
+    def estimate_flops(self, sequence_len):
+        """ Return the estimated FLOPs per token for the model. Ref: https://arxiv.org/abs/2204.02311 """
+        nparams = sum(p.numel() for p in self.parameters())
+        nparams_embedding = self.tok_emb.weight.numel() + self.pos_emb.weight.numel()
+        l = len(self.blocks)  # n_layers
+        h = self.blocks[0].self_attn.num_heads  # n_heads
+        q = self.blocks[0].self_attn.embed_dim // h  # head_dim (dim // n_heads)
+        t = sequence_len
+        num_flops_per_token = 6 * (nparams - nparams_embedding) + 12 * l * h * q * t
+        return num_flops_per_token 
+       
     def forward(self, x):
         B, T = x.shape
         tok_emb = self.tok_emb(x)
@@ -51,16 +64,22 @@ class LightningGPT(pl.LightningModule):
         self.model = TinyGPT(vocab_size, dim, n_layers, n_heads)
         self._train_dataloader = train_dataloader
         self.build_val_loader = build_val_loader
+        max_seq_len = train_dataloader.max_seq_len
+        self.batch_size = train_dataloader.batch_size
+        self.flops_per_token = self.model.estimate_flops(max_seq_len)
     
     def forward(self, x):
         return self.model(x)
     
     def training_step(self, batch, batch_idx):
         x, y, _ = batch
+        B, T = x.shape  # batch size and sequence length
         logits = self(x)
         loss = F.cross_entropy(logits.reshape(-1, self.hparams.vocab_size), y.reshape(-1))
 
+        flops_so_far = self.flops_per_token * B * T * world_size * (self.global_step + 1)
         self.log('train_loss', loss, prog_bar=True, sync_dist=True)
+        self.log('flops_so_far', flops_so_far, prog_bar=False, sync_dist=True)
 
         # Log optimizer parameters
         optimizer = self.optimizers()
@@ -156,6 +175,7 @@ def train_gpt(
     batch_size=32,
     max_steps=1000,
     eval_every=250,
+    val_max_steps=2,
     grad_clip=1.0,
     grad_accum_steps=1,
     devices=None,
@@ -165,7 +185,6 @@ def train_gpt(
     wandb_enabled=True
 ):
     # Print distributed info
-    is_ddp, rank, local_rank, world_size = get_dist_info()
     print0("=== Training Configuration ===")
     print0(f"DDP Mode: {is_ddp}")
     if is_ddp:
@@ -241,6 +260,7 @@ def train_gpt(
     print0("\n=== Training Settings ===")
     print0(f"Max steps: {max_steps}")
     print0(f"Eval every: {eval_every} steps")
+    print0(f"Validation max steps: {val_max_steps}")
     print0(f"Gradient accumulation steps: {grad_accum_steps}")
     print0(f"Gradient clipping: {grad_clip if grad_clip > 0 else 'None'}")
     print0(f"Strategy: {'ddp' if devices > 1 else 'auto'}")
@@ -278,7 +298,7 @@ def train_gpt(
         accelerator=accelerator,
         strategy="ddp" if devices > 1 else "auto",
         val_check_interval=eval_every,
-        limit_val_batches=2,
+        limit_val_batches=val_max_steps,
         fast_dev_run=smoke_test,
         precision="bf16-mixed" if device == "cuda" else '32-true',
         gradient_clip_val=grad_clip if grad_clip > 0 else None,
@@ -311,6 +331,7 @@ if __name__ == "__main__":
         n_heads=n_heads,
         batch_size=32,
         max_steps=1000,
+        val_max_steps=10,
         smoke_test=False,
         wandb_name='test'
     )

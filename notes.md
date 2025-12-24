@@ -10,6 +10,7 @@ The major goal of this set of experiments is to learn more about the following (
 - Add CORE eval
 - Research KV caching
 - Research memory capacity requirements
+- Understand FLOPS / token calculation
 
 # Estimation of number of iterations
 

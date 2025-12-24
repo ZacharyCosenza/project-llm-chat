@@ -7,13 +7,6 @@ from core.dataset import list_parquet_files
 from core.utils import get_dist_info
 
 def tokenizing_dataloader(tokenizer, B, T, split="train", device=None, resume_state=None, stream=True):
-    """
-    Load parquet files → tokenize → yield (x, y) batches with DDP support.
-    
-    Args:
-        device: Device to use. If None, auto-detects (cuda if available, else cpu)
-        stream: If True, infinite multi-epoch streaming. If False, single pass through data.
-    """
     assert split in ["train", "val"]
     
     # Auto-detect device
