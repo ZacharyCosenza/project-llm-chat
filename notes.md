@@ -4,12 +4,12 @@ The major goal of this set of experiments is to learn more about the following (
 
 1. Large(ish) scale training include multi-step training (pre/mid/fine/RL) and observing how models abilities change as a function of their training
 2. Engineering the LLM model to be somewhat interactive
-3. Evaluation of LLM models on tasks
 
 # TODO
 
 - Add CORE eval
-- 
+- Research KV caching
+- Research memory capacity requirements
 
 # Estimation of number of iterations
 
@@ -19,7 +19,7 @@ K suggests three methods of setting the number of iterations: (1) direct, (2) ta
 2. If we assume a target number of FLOPS of 4e19, and a token requires 6 FLOPS x num_parameters (roughly 2 for forward pass, 4 for backwards pass, don't trust my numbers), and batch size = 524288 we get roughly 28K iterations.
 3. Assume a optimal 20:1 ratio, if our LLM has 461M parameters, that requires 9.2B tokens (data = tokens always). If batch size = 524288 we get 17.5K iterations.
 
-Further breaking down the training, we must understand the concept of multi-GPU. If we have 8XH100 GPUs with batch_size capability for the H100, we have 8 * batch_size which is good for (1) speed and (2) model quality. Next, remember that for a sequence, when it is passed into the tokenizer we always pad/truncate to a particular max_length = 1024. It is good to think of us thus having max_length x batch_size x num_gpu tokens per iteration. Furthermore, if we have gradient accumulation we squeeze out an additional x accumulation_steps of compute. 
+Further breaking down the training, we must understand the concept of multi-GPU. If we have 8XH100 GPUs with batch_size capability for the H100, we have 8 * batch_size which is good for (1) speed and (2) model quality. Next, remember that for a sequence, when it is passed into the tokenizer we always pad/truncate to a particular max_length = 2048. It is good to think of us thus having max_length x batch_size x num_gpu tokens per iteration. Furthermore, if we have gradient accumulation we squeeze out an additional x accumulation_steps of compute. 
 
 So determining how many iterations we may run for sould probably start with (1) estimate of the optimal number of FLOPS using the 20:1 ratio followed by (2) refining that estimate based on your budget (where we can get $/FLOP based on the GPU and provider).
 

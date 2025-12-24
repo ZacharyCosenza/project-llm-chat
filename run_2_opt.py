@@ -5,6 +5,7 @@ import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
 from transformers import AutoTokenizer
 from core.dataloader import simple_dataloader, tokenizing_dataloader
+from core.utils import print0, get_dist_info
 
 class TinyGPT(nn.Module):
     def __init__(self, vocab_size=100, dim=64, n_layers=2, n_heads=2, max_seq_len=128):
@@ -163,13 +164,26 @@ def train_gpt(
     wandb_name=None,
     wandb_enabled=True
 ):
+    # Print distributed info
+    is_ddp, rank, local_rank, world_size = get_dist_info()
+    print0("=== Training Configuration ===")
+    print0(f"DDP Mode: {is_ddp}")
+    if is_ddp:
+        print0(f"Rank: {rank}/{world_size}, Local Rank: {local_rank}")
+
     accelerator = "gpu" if torch.cuda.is_available() else "cpu"
     if devices is None:
         devices = torch.cuda.device_count() if torch.cuda.is_available() else 1
+
+    print0(f"Accelerator: {accelerator}")
+    print0(f"Devices: {devices}")
+
     torch.set_float32_matmul_precision('medium')
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if device == "cuda":
         torch.cuda.empty_cache()
+        get_max_memory = torch.cuda.max_memory_allocated if device == "cuda" else lambda: 0
+        print0(f"CUDA available, using device: {device}")
     
     # Logger
     logger = None
@@ -190,12 +204,21 @@ def train_gpt(
         )
     
     # Dataloaders
+    print0("\n=== Loading Data ===")
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
     tokenizer.pad_token = tokenizer.eos_token
+    print0(f"Tokenizer vocab size: {tokenizer.vocab_size}")
     train_loader = tokenizing_dataloader(tokenizer, batch_size, max_seq_len, split="train", device=device)
     build_val_loader = lambda: simple_dataloader(tokenizer, batch_size, max_seq_len, split="val", device=device)
+    print0(f"Batch size: {batch_size}, Max sequence length: {max_seq_len}")
     
     # Model
+    print0("\n=== Model Configuration ===")
+    print0(f"Dimension: {dim}")
+    print0(f"Layers: {n_layers}")
+    print0(f"Heads: {n_heads}")
+    print0(f"Vocab size: {tokenizer.vocab_size}")
+
     model = LightningGPT(
         vocab_size=tokenizer.vocab_size,
         dim=dim,
@@ -208,8 +231,47 @@ def train_gpt(
         train_dataloader=train_loader,
         build_val_loader=build_val_loader
     )
+
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print0(f"Total parameters: {total_params:,}")
+    print0(f"Trainable parameters: {trainable_params:,}")
     
     # Trainer
+    print0("\n=== Training Settings ===")
+    print0(f"Max steps: {max_steps}")
+    print0(f"Eval every: {eval_every} steps")
+    print0(f"Gradient accumulation steps: {grad_accum_steps}")
+    print0(f"Gradient clipping: {grad_clip if grad_clip > 0 else 'None'}")
+    print0(f"Strategy: {'ddp' if devices > 1 else 'auto'}")
+    print0(f"Precision: {'bf16-mixed' if device == 'cuda' else '32-true'}")
+    print0(f"Smoke test: {smoke_test}")
+
+    print0("\n=== Optimizer Settings ===")
+    lr_scale = (dim / 768) ** -0.5
+    print0(f"Base LR: {base_lr}")
+    print0(f"LR scale factor: {lr_scale:.4f}")
+    print0(f"Head LR: {0.004 * lr_scale * base_lr:.6f}")
+    print0(f"Embedding LR: {0.2 * lr_scale * base_lr:.6f}")
+    print0(f"Other LR: {0.02 * base_lr:.6f}")
+    print0(f"Weight decay: {weight_decay}")
+    print0(f"Warmup ratio: {warmup_ratio}")
+    print0(f"Warmdown ratio: {warmdown_ratio}")
+
+    warmup_steps = int(warmup_ratio * max_steps)
+    warmdown_steps = int(warmdown_ratio * max_steps)
+    constant_steps = max_steps - warmup_steps - warmdown_steps
+    print0(f"Warmup steps: {warmup_steps}")
+    print0(f"Constant steps: {constant_steps}")
+    print0(f"Warmdown steps: {warmdown_steps}")
+
+    if wandb_enabled and not smoke_test:
+        print0(f"\nWandB logging enabled: {wandb_project}/{wandb_name}")
+    else:
+        print0("\nWandB logging disabled")
+
+    print0("\n=== Starting Training ===\n")
+
     trainer = pl.Trainer(
         max_steps=max_steps,
         devices=devices,
@@ -224,16 +286,30 @@ def train_gpt(
         logger=logger,
         default_root_dir="logs"
     )
-    
+
     trainer.fit(model)
+
+    print0("\n=== Training Complete ===")
+    if device == "cuda":
+        max_memory_mb = get_max_memory() / (1024 ** 2)
+        print0(f"Peak GPU memory: {max_memory_mb:.2f} MB")
+
     return model, trainer
 
 if __name__ == "__main__":
+
+    depth = 2
+    num_layers = depth
+    model_dim = depth * 64 # aspect ratio 64 (usually this is varied from 64 -> 128 as model size increases)
+    n_heads = max(1, (model_dim + 127) // 128) # head dim 128 (the division here is ceil div)
+    n_kv_heads = n_heads # default is 1:1 GQA (Group Query Attention) ratio (i.e. GQA is disabled)
+
     train_gpt(
-        dim=128,
-        max_seq_len=128,
-        n_layers=2,
-        batch_size=2,
+        dim=model_dim,
+        max_seq_len=128, # 2048
+        n_layers=num_layers, # 20
+        n_heads=n_heads,
+        batch_size=32,
         max_steps=1000,
         smoke_test=False,
         wandb_name='test'
