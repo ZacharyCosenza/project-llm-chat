@@ -193,10 +193,10 @@ def train_gpt(
     smoke_test=False,
     wandb_name=None
 ):
-    # Model architecture parameters
-    dim = 64
-    n_layers = 2
-    n_heads = 2
+    # Model architecture parameters\
+    n_layers = 20
+    dim = depth * 64
+    n_heads = max(1, (dim + 127) // 128)
 
     # Optimizer parameters
     base_lr = 1e-3
@@ -349,8 +349,8 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Train GPT model")
-    parser.add_argument("--batch_size", type=int, default=8, help="Batch size per rank")
-    parser.add_argument("--max_seq_len", type=int, default=1024, help="Maximum sequence length")
+    parser.add_argument("--batch_size", type=int, default=2, help="Batch size per rank")
+    parser.add_argument("--max_seq_len", type=int, default=2048, help="Maximum sequence length")
     parser.add_argument("--max_steps", type=int, default=1000, help="Maximum training steps")
     parser.add_argument("--val_max_steps", type=int, default=10, help="Maximum validation steps")
     parser.add_argument("--smoke_test", action="store_true", help="Run smoke test (fast dev run)")
