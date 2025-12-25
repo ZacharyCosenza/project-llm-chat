@@ -195,7 +195,7 @@ def train_gpt(
 ):
     # Model architecture parameters\
     n_layers = 20
-    dim = depth * 64
+    dim = n_layers * 64
     n_heads = max(1, (dim + 127) // 128)
 
     # Optimizer parameters
