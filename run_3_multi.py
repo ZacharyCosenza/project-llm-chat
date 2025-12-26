@@ -3,9 +3,98 @@ import torch.nn.functional as F
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
 from transformers import AutoTokenizer
-from core.dataloader import simple_dataloader, tokenizing_dataloader
+from torch.utils.data import DataLoader, IterableDataset
+import pyarrow.parquet as pq
+from collections import deque
+from core.dataset import list_parquet_files
 from core.utils import print0, get_dist_info
 from core.models import TinyGPT
+
+
+class ParquetTokenDataset(IterableDataset):
+    """
+    Iterable dataset that loads parquet files and tokenizes on-the-fly.
+    Properly handles DDP sharding using PyTorch's worker_info.
+    """
+
+    def __init__(self, tokenizer, batch_size, max_seq_len, split="train", device=None):
+        super().__init__()
+        self.tokenizer = tokenizer
+        self.batch_size = batch_size
+        self.max_seq_len = max_seq_len
+        self.split = split
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+
+        # Get parquet files for this split
+        all_paths = list_parquet_files()
+        self.paths = all_paths[:-1] if split == "train" else all_paths[-1:]
+
+    def __iter__(self):
+        # Get DDP worker info from PyTorch's distributed context
+        worker_info = torch.utils.data.get_worker_info()
+
+        # Determine rank and world size for DDP sharding
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            rank = torch.distributed.get_rank()
+            world_size = torch.distributed.get_world_size()
+        else:
+            rank = 0
+            world_size = 1
+
+        # If using multiple dataloader workers, further shard the data
+        if worker_info is not None:
+            worker_id = worker_info.id
+            num_workers = worker_info.num_workers
+            # Combine DDP rank with worker ID for sharding
+            shard_id = rank * num_workers + worker_id
+            total_shards = world_size * num_workers
+        else:
+            shard_id = rank
+            total_shards = world_size
+
+        # Token buffer for accumulating tokens
+        needed_tokens = self.batch_size * self.max_seq_len + 1
+        token_buffer = deque()
+
+        # Iterate through parquet files indefinitely
+        while True:
+            for filepath in self.paths:
+                pf = pq.ParquetFile(filepath)
+
+                # Shard row groups across DDP processes and workers
+                for rg_idx in range(shard_id, pf.num_row_groups, total_shards):
+                    # Read row group and extract texts
+                    texts = pf.read_row_group(rg_idx).column('text').to_pylist()
+
+                    # Tokenize texts and add to buffer
+                    for text in texts:
+                        tokens = self.tokenizer.encode(
+                            text,
+                            add_special_tokens=True,
+                            max_length=2048,
+                            truncation=True
+                        )
+                        token_buffer.extend(tokens)
+
+                        # Yield batches whenever we have enough tokens
+                        while len(token_buffer) >= needed_tokens:
+                            # Extract exactly the needed tokens
+                            batch_tokens = [token_buffer.popleft() for _ in range(needed_tokens)]
+
+                            # Create tensors
+                            use_pin = self.device == "cuda"
+                            scratch = torch.tensor(batch_tokens, dtype=torch.long, pin_memory=use_pin)
+
+                            x = scratch[:-1].view(self.batch_size, self.max_seq_len).to(self.device, non_blocking=use_pin)
+                            y = scratch[1:].view(self.batch_size, self.max_seq_len).to(self.device, non_blocking=use_pin)
+
+                            if self.split == "train":
+                                # Training data includes state (unused but kept for compatibility)
+                                yield x, y, {}
+                            else:
+                                # Validation data is just (x, y)
+                                yield x, y
+
 
 class LightningGPT(pl.LightningModule):
     def __init__(self, vocab_size, dim=64, n_layers=2, n_heads=2,
@@ -114,29 +203,49 @@ class LightningGPT(pl.LightningModule):
         }
     
     def train_dataloader(self):
-        print(f'loading dataloader')
+        print(f'loading train dataloader')
         if self._train_loader is None:
             device = "cuda" if self.device.type == "cuda" else "cpu"
-            self._train_loader = tokenizing_dataloader(
+            dataset = ParquetTokenDataset(
                 self.tokenizer,
                 self.batch_size,
                 self.max_seq_len,
                 split="train",
                 device=device
             )
+            # Use PyTorch DataLoader with DDP-compatible settings
+            # batch_size=None because the dataset already yields batched data
+            # num_workers=0 to avoid multiprocessing issues with tokenizers
+            # The dataset handles DDP sharding internally using torch.distributed
+            self._train_loader = DataLoader(
+                dataset,
+                batch_size=None,
+                num_workers=0,
+                pin_memory=False,  # Already handled in the dataset
+                persistent_workers=False
+            )
         return self._train_loader
 
     def val_dataloader(self):
+        print(f'loading val dataloader')
         # Lazy initialization: create dataloader after DDP has spawned processes
         # This is called AFTER setup(), so self.device will be properly set by Lightning
         if self._val_loader is None:
             device = "cuda" if self.device.type == "cuda" else "cpu"
-            self._val_loader = simple_dataloader(
+            dataset = ParquetTokenDataset(
                 self.tokenizer,
                 self.batch_size,
                 self.max_seq_len,
                 split="val",
                 device=device
+            )
+            # Use PyTorch DataLoader with DDP-compatible settings
+            self._val_loader = DataLoader(
+                dataset,
+                batch_size=None,
+                num_workers=0,
+                pin_memory=False,
+                persistent_workers=False
             )
         return self._val_loader
 
