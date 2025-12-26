@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn.functional as F
 import pytorch_lightning as pl
@@ -12,11 +13,6 @@ from core.models import TinyGPT
 
 
 class ParquetTokenDataset(IterableDataset):
-    """
-    Iterable dataset that loads parquet files and tokenizes on-the-fly.
-    Properly handles DDP sharding using PyTorch's worker_info.
-    """
-
     def __init__(self, tokenizer, batch_size, max_seq_len, split="train", device=None):
         super().__init__()
         self.tokenizer = tokenizer
@@ -25,48 +21,38 @@ class ParquetTokenDataset(IterableDataset):
         self.split = split
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
-        # Get parquet files for this split
         all_paths = list_parquet_files()
         self.paths = all_paths[:-1] if split == "train" else all_paths[-1:]
 
     def __iter__(self):
-        # Get DDP worker info from PyTorch's distributed context
         worker_info = torch.utils.data.get_worker_info()
 
-        # Determine rank and world size for DDP sharding
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             rank = torch.distributed.get_rank()
             world_size = torch.distributed.get_world_size()
         else:
-            rank = 0
-            world_size = 1
+            rank = int(os.environ.get('RANK', 0))
+            world_size = int(os.environ.get('WORLD_SIZE', 1))
 
-        # If using multiple dataloader workers, further shard the data
         if worker_info is not None:
             worker_id = worker_info.id
             num_workers = worker_info.num_workers
-            # Combine DDP rank with worker ID for sharding
             shard_id = rank * num_workers + worker_id
             total_shards = world_size * num_workers
         else:
             shard_id = rank
             total_shards = world_size
 
-        # Token buffer for accumulating tokens
         needed_tokens = self.batch_size * self.max_seq_len + 1
         token_buffer = deque()
 
-        # Iterate through parquet files indefinitely
         while True:
             for filepath in self.paths:
                 pf = pq.ParquetFile(filepath)
 
-                # Shard row groups across DDP processes and workers
                 for rg_idx in range(shard_id, pf.num_row_groups, total_shards):
-                    # Read row group and extract texts
                     texts = pf.read_row_group(rg_idx).column('text').to_pylist()
 
-                    # Tokenize texts and add to buffer
                     for text in texts:
                         tokens = self.tokenizer.encode(
                             text,
@@ -76,12 +62,9 @@ class ParquetTokenDataset(IterableDataset):
                         )
                         token_buffer.extend(tokens)
 
-                        # Yield batches whenever we have enough tokens
                         while len(token_buffer) >= needed_tokens:
-                            # Extract exactly the needed tokens
                             batch_tokens = [token_buffer.popleft() for _ in range(needed_tokens)]
 
-                            # Create tensors
                             use_pin = self.device == "cuda"
                             scratch = torch.tensor(batch_tokens, dtype=torch.long, pin_memory=use_pin)
 
@@ -89,10 +72,8 @@ class ParquetTokenDataset(IterableDataset):
                             y = scratch[1:].view(self.batch_size, self.max_seq_len).to(self.device, non_blocking=use_pin)
 
                             if self.split == "train":
-                                # Training data includes state (unused but kept for compatibility)
                                 yield x, y, {}
                             else:
-                                # Validation data is just (x, y)
                                 yield x, y
 
 
@@ -117,7 +98,7 @@ class LightningGPT(pl.LightningModule):
     
     def training_step(self, batch, batch_idx):
         x, y, _ = batch
-        B, T = x.shape  # batch size and sequence length
+        B, T = x.shape
         logits = self(x)
         loss = F.cross_entropy(logits.reshape(-1, self.hparams.vocab_size), y.reshape(-1))
 
@@ -126,27 +107,24 @@ class LightningGPT(pl.LightningModule):
         self.log('train_loss', loss, prog_bar=True, sync_dist=True)
         self.log('flops_so_far', flops_so_far, prog_bar=False, sync_dist=True)
 
-        # Log optimizer parameters
         optimizer = self.optimizers()
         if optimizer is not None:
-            # Log learning rates for each parameter group
             param_groups = optimizer.param_groups
             self.log('lr/head', param_groups[0]['lr'], prog_bar=False, sync_dist=True)
             self.log('lr/embeddings', param_groups[1]['lr'], prog_bar=False, sync_dist=True)
             self.log('lr/other', param_groups[2]['lr'], prog_bar=False, sync_dist=True)
 
-            # Log scheduler progress
             current_step = self.global_step
             max_steps = self.trainer.max_steps
             warmup_steps = int(self.hparams.warmup_ratio * max_steps)
             warmdown_start = max_steps - int(self.hparams.warmdown_ratio * max_steps)
 
             if current_step < warmup_steps:
-                phase = 0  # warmup
+                phase = 0
             elif current_step < warmdown_start:
-                phase = 1  # constant
+                phase = 1
             else:
-                phase = 2  # warmdown
+                phase = 2
 
             self.log('opt/phase', phase, prog_bar=False, sync_dist=True)
             self.log('opt/step_progress', current_step / max_steps, prog_bar=False, sync_dist=True)
@@ -179,15 +157,12 @@ class LightningGPT(pl.LightningModule):
             max_steps = self.trainer.max_steps
             warmup_steps = int(self.hparams.warmup_ratio * max_steps)
             warmdown_steps = int(self.hparams.warmdown_ratio * max_steps)
-            
+
             if current_step < warmup_steps:
-                # Linear warmup
                 return (current_step + 1) / warmup_steps
             elif current_step <= max_steps - warmdown_steps:
-                # Constant
                 return 1.0
             else:
-                # Linear warmdown
                 progress = (max_steps - current_step) / warmdown_steps
                 return progress + (1 - progress) * self.hparams.final_lr_frac
         
@@ -197,7 +172,7 @@ class LightningGPT(pl.LightningModule):
             'optimizer': optimizer,
             'lr_scheduler': {
                 'scheduler': scheduler,
-                'interval': 'step',  # Update every step
+                'interval': 'step',
                 'frequency': 1
             }
         }
@@ -213,23 +188,17 @@ class LightningGPT(pl.LightningModule):
                 split="train",
                 device=device
             )
-            # Use PyTorch DataLoader with DDP-compatible settings
-            # batch_size=None because the dataset already yields batched data
-            # num_workers=0 to avoid multiprocessing issues with tokenizers
-            # The dataset handles DDP sharding internally using torch.distributed
             self._train_loader = DataLoader(
                 dataset,
                 batch_size=None,
                 num_workers=0,
-                pin_memory=False,  # Already handled in the dataset
+                pin_memory=False,
                 persistent_workers=False
             )
         return self._train_loader
 
     def val_dataloader(self):
         print(f'loading val dataloader')
-        # Lazy initialization: create dataloader after DDP has spawned processes
-        # This is called AFTER setup(), so self.device will be properly set by Lightning
         if self._val_loader is None:
             device = "cuda" if self.device.type == "cuda" else "cpu"
             dataset = ParquetTokenDataset(
@@ -239,7 +208,6 @@ class LightningGPT(pl.LightningModule):
                 split="val",
                 device=device
             )
-            # Use PyTorch DataLoader with DDP-compatible settings
             self._val_loader = DataLoader(
                 dataset,
                 batch_size=None,
@@ -257,31 +225,26 @@ def train_gpt(
     smoke_test=False,
     wandb_name=None
 ):
-    # Model architecture parameters\
     n_layers = 20
     dim = n_layers * 64
     n_heads = max(1, (dim + 127) // 128)
 
-    # Optimizer parameters
     base_lr = 1e-3
     weight_decay = 0.01
     warmup_ratio = 0.0
     warmdown_ratio = 0.2
     final_lr_frac = 0.0
 
-    # Training parameters
     eval_every = 250
     grad_clip = 1.0
     grad_accum_steps = 1
     devices = None
 
-    # Logging parameters
     wandb_project = "llm-chat"
     wandb_enabled = True
-    # Get distributed info (will be correct after DDP spawns processes)
+
     is_ddp, rank, local_rank, world_size = get_dist_info()
 
-    # Print distributed info
     print0("=== Training Configuration ===")
     print0(f"DDP Mode: {is_ddp}")
     if is_ddp:
@@ -296,7 +259,6 @@ def train_gpt(
 
     torch.set_float32_matmul_precision('medium')
 
-    # Logger
     logger = None
     if wandb_enabled and not smoke_test:
         logger = WandbLogger(
@@ -314,15 +276,13 @@ def train_gpt(
             }
         )
 
-    # Tokenizer setup (no CUDA calls here)
     print0("\n=== Loading Data ===")
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
     tokenizer.pad_token = tokenizer.eos_token
     print0(f"Tokenizer vocab size: {tokenizer.vocab_size}")
     print0(f"Batch size: {batch_size}, Max sequence length: {max_seq_len}")
     print0("Note: Dataloaders will be created lazily after DDP initialization")
-    
-    # Model
+
     print0("\n=== Model Configuration ===")
     print0(f"Dimension: {dim}")
     print0(f"Layers: {n_layers}")
@@ -348,8 +308,7 @@ def train_gpt(
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print0(f"Total parameters: {total_params:,}")
     print0(f"Trainable parameters: {trainable_params:,}")
-    
-    # Trainer
+
     print0("\n=== Training Settings ===")
     print0(f"Max steps: {max_steps}")
     print0(f"Eval every: {eval_every} steps")
