@@ -65,11 +65,11 @@ class ParquetTokenDataset(IterableDataset):
                         while len(token_buffer) >= needed_tokens:
                             batch_tokens = [token_buffer.popleft() for _ in range(needed_tokens)]
 
-                            use_pin = self.device == "cuda"
-                            scratch = torch.tensor(batch_tokens, dtype=torch.long, pin_memory=use_pin)
+                            # Return CPU tensors - let DataLoader handle GPU transfer
+                            scratch = torch.tensor(batch_tokens, dtype=torch.long)
 
-                            x = scratch[:-1].view(self.batch_size, self.max_seq_len).to(self.device, non_blocking=use_pin)
-                            y = scratch[1:].view(self.batch_size, self.max_seq_len).to(self.device, non_blocking=use_pin)
+                            x = scratch[:-1].view(self.batch_size, self.max_seq_len)
+                            y = scratch[1:].view(self.batch_size, self.max_seq_len)
 
                             if self.split == "train":
                                 yield x, y, {}
@@ -190,9 +190,9 @@ class LightningGPT(pl.LightningModule):
             self._train_loader = DataLoader(
                 dataset,
                 batch_size=None,
-                num_workers=0,
-                pin_memory=False,
-                persistent_workers=False
+                num_workers=2,
+                pin_memory=True,
+                persistent_workers=True
             )
         return self._train_loader
 
@@ -210,9 +210,9 @@ class LightningGPT(pl.LightningModule):
             self._val_loader = DataLoader(
                 dataset,
                 batch_size=None,
-                num_workers=0,
-                pin_memory=False,
-                persistent_workers=False
+                num_workers=2,
+                pin_memory=True,
+                persistent_workers=True
             )
         return self._val_loader
 

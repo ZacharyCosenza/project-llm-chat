@@ -349,7 +349,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Train GPT model")
-    parser.add_argument("--batch_size", type=int, default=2, help="Batch size per rank")
+    parser.add_argument("--batch_size", type=int, default=32, help="Batch size per rank")
     parser.add_argument("--max_seq_len", type=int, default=2048, help="Maximum sequence length")
     parser.add_argument("--max_steps", type=int, default=1000, help="Maximum training steps")
     parser.add_argument("--val_max_steps", type=int, default=10, help="Maximum validation steps")
