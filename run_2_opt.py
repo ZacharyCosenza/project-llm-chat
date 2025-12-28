@@ -1,55 +1,12 @@
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
 from transformers import AutoTokenizer
 from core.dataloader import simple_dataloader, tokenizing_dataloader
 from core.utils import print0, get_dist_info
-
-class TinyGPT(nn.Module):
-    def __init__(self, vocab_size=100, dim=64, n_layers=2, n_heads=2, max_seq_len=128):
-        super().__init__()
-        self.tok_emb = nn.Embedding(vocab_size, dim)
-        self.pos_emb = nn.Embedding(max_seq_len, dim)
-        
-        self.blocks = nn.ModuleList([
-            nn.TransformerEncoderLayer(
-                d_model=dim, 
-                nhead=n_heads, 
-                dim_feedforward=dim,
-                batch_first=True,
-                norm_first=True
-            ) for _ in range(n_layers)
-        ])
-        
-        self.ln_f = nn.LayerNorm(dim)
-        self.head = nn.Linear(dim, vocab_size, bias=False)
-    
-    def estimate_flops(self, sequence_len):
-        """ Return the estimated FLOPs per token for the model. Ref: https://arxiv.org/abs/2204.02311 """
-        nparams = sum(p.numel() for p in self.parameters())
-        nparams_embedding = self.tok_emb.weight.numel() + self.pos_emb.weight.numel()
-        l = len(self.blocks)  # n_layers
-        h = self.blocks[0].self_attn.num_heads  # n_heads
-        q = self.blocks[0].self_attn.embed_dim // h  # head_dim (dim // n_heads)
-        t = sequence_len
-        num_flops_per_token = 6 * (nparams - nparams_embedding) + 12 * l * h * q * t
-        return num_flops_per_token 
-       
-    def forward(self, x):
-        B, T = x.shape
-        tok_emb = self.tok_emb(x)
-        pos_emb = self.pos_emb(torch.arange(T, device=x.device))
-        x = tok_emb + pos_emb
-        
-        causal_mask = nn.Transformer.generate_square_subsequent_mask(T, device=x.device)
-        for block in self.blocks:
-            x = block(x, src_mask=causal_mask, is_causal=True)
-        
-        x = self.ln_f(x)
-        logits = self.head(x)
-        return logits
+from core.validation import run_sentence_completion
+from core.models import TinyGPT
 
 class LightningGPT(pl.LightningModule):
     def __init__(self, vocab_size, dim=64, n_layers=2, n_heads=2,
@@ -113,10 +70,23 @@ class LightningGPT(pl.LightningModule):
         logits = self(x)
         loss = F.cross_entropy(logits.reshape(-1, self.hparams.vocab_size), y.reshape(-1))
         perplexity = torch.exp(loss)
-        
+
         self.log('val_loss', loss, prog_bar=True, sync_dist=True)
         self.log('val_perplexity', perplexity, sync_dist=True)
         return loss
+
+    def on_validation_epoch_end(self):
+        """Run sentence completion at the end of each validation epoch."""
+        # Only run on rank 0 to avoid duplicate outputs
+        if self.trainer.global_rank == 0:
+            run_sentence_completion(
+                self.model,
+                self.tokenizer,
+                device=self.device,
+                max_new_tokens=50,
+                temperature=0.8,
+                top_k=40
+            )
     
     def configure_optimizers(self):
         embedding_params = list(self.model.tok_emb.parameters()) + list(self.model.pos_emb.parameters())
@@ -158,8 +128,6 @@ class LightningGPT(pl.LightningModule):
         }
     
     def train_dataloader(self):
-        # Lazy initialization: create dataloader after DDP has spawned processes
-        # This is called AFTER setup(), so self.device will be properly set by Lightning
         if self._train_loader is None:
             device = "cuda" if self.device.type == "cuda" else "cpu"
             self._train_loader = tokenizing_dataloader(
@@ -172,8 +140,6 @@ class LightningGPT(pl.LightningModule):
         return self._train_loader
 
     def val_dataloader(self):
-        # Lazy initialization: create dataloader after DDP has spawned processes
-        # This is called AFTER setup(), so self.device will be properly set by Lightning
         if self._val_loader is None:
             device = "cuda" if self.device.type == "cuda" else "cpu"
             self._val_loader = simple_dataloader(
@@ -193,7 +159,7 @@ def train_gpt(
     smoke_test=False,
     wandb_name=None
 ):
-    # Model architecture parameters\
+    # Model architecture parameters
     n_layers = 20
     dim = n_layers * 64
     n_heads = max(1, (dim + 127) // 128)
@@ -208,7 +174,7 @@ def train_gpt(
     # Training parameters
     eval_every = 250
     grad_clip = 1.0
-    grad_accum_steps = 1
+    grad_accum_steps = 4
     devices = None
 
     # Logging parameters
@@ -250,15 +216,12 @@ def train_gpt(
             }
         )
 
-    # Tokenizer setup (no CUDA calls here)
     print0("\n=== Loading Data ===")
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
     tokenizer.pad_token = tokenizer.eos_token
     print0(f"Tokenizer vocab size: {tokenizer.vocab_size}")
     print0(f"Batch size: {batch_size}, Max sequence length: {max_seq_len}")
     print0("Note: Dataloaders will be created lazily after DDP initialization")
-    
-    # Model
     print0("\n=== Model Configuration ===")
     print0(f"Dimension: {dim}")
     print0(f"Layers: {n_layers}")
@@ -285,7 +248,6 @@ def train_gpt(
     print0(f"Total parameters: {total_params:,}")
     print0(f"Trainable parameters: {trainable_params:,}")
     
-    # Trainer
     print0("\n=== Training Settings ===")
     print0(f"Max steps: {max_steps}")
     print0(f"Eval every: {eval_every} steps")
@@ -295,7 +257,6 @@ def train_gpt(
     print0(f"Strategy: {'ddp' if devices > 1 else 'auto'}")
     print0(f"Precision: {'bf16-mixed' if accelerator == 'gpu' else '32-true'}")
     print0(f"Smoke test: {smoke_test}")
-
     print0("\n=== Optimizer Settings ===")
     lr_scale = (dim / 768) ** -0.5
     print0(f"Base LR: {base_lr}")

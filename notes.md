@@ -9,8 +9,7 @@ The major goal of this set of experiments is to learn more about the following (
 
 - Add CORE eval
 - Research KV caching
-- Research memory capacity requirements
-- Understand FLOPS / token calculation
+- Understanding number of iterations from FLOPs
 - Understanding of memory usage (weights, gradients, activations, data)
 
 # Estimation of number of iterations
@@ -40,3 +39,9 @@ Remember that attention masking is already used in training GPT-style models, so
 Let's start understanding the datasets. In K's code the download process is kicked off using python -m nanochat.dataset -n num_shards so let's just copy that (this loads the pretraining data from Huggingface). Speaking of data, let's plan the overall size of the model. When starting, user should download the shards they need and store them as parquet files. I then went ahead and incorporated the major aspects of K's code into pytorch lightning because I find dealing with the multi-GPU process tedious. I have yet to scale up to the proper model size so it is unclear if the dataloaders have been implemented correctly but we will see. I also tried to use his distributed Muon optimizer with lightning but that required a full custom training step which I don't want to deal with quite yet. In it's place I had Claude extract out the underlying logic of the optimizer (basically splitting the LLM into slow and fast optimizations) and created a good baseline using AdamW. I am still trying to figure out how much we should abstract away from K's very low level implementation and still aline with Goal 2 above. I also managed to get a basic version of the model working at around 325M parameters with max_seq_len = 128. Next step is scaling up to the proper parameter size.
 
 # Scaling up
+
+One of the critical aspect of this study is to examine how to create large-scale ML experiments. With K's batch size of 32, token size of 2048, and ~400M parameter model, this is a small-scale LLM project but fairly large-scale project relative to the things I have done. Stealing K's dataloader allowed me to do this on 8 A40 GPUs (distribute samples according to rank, stream etc), and easily run experiments with fewer GPUs. Trying to simplify the dataloader to use a more classic pytorch dataloader resulted in OOM errors even at smaller batch sizes and smaller context length. In future I would like to keep track of both RAM and VRAM memory before and during training (memory is du -sh /workspace).
+
+# Creating a set for validation
+
+The paradigm here is only having training and validation. We hold out a parquet file for validation. I had been using perplexity but I want to add some additional tests.

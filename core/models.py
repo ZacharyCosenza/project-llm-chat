@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 class TinyGPT(nn.Module):
     def __init__(self, vocab_size=100, dim=64, n_layers=2, n_heads=2, max_seq_len=128):
@@ -36,11 +37,28 @@ class TinyGPT(nn.Module):
         tok_emb = self.tok_emb(x)
         pos_emb = self.pos_emb(torch.arange(T, device=x.device))
         x = tok_emb + pos_emb
-        
+
         causal_mask = nn.Transformer.generate_square_subsequent_mask(T, device=x.device)
         for block in self.blocks:
             x = block(x, src_mask=causal_mask, is_causal=True)
-        
+
         x = self.ln_f(x)
         logits = self.head(x)
         return logits
+
+    @torch.no_grad()
+    def predict(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+        for _ in range(max_new_tokens):
+            idx_cond = idx if idx.size(1) <= self.pos_emb.num_embeddings else idx[:, -self.pos_emb.num_embeddings:]
+            logits = self(idx_cond)
+            logits = logits[:, -1, :] / temperature
+
+            if top_k is not None:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = -float('Inf')
+
+            probs = F.softmax(logits, dim=-1)
+            idx_next = torch.multinomial(probs, num_samples=1)
+            idx = torch.cat((idx, idx_next), dim=1)
+
+        return idx
