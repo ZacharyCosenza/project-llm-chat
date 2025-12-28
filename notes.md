@@ -44,4 +44,4 @@ One of the critical aspect of this study is to examine how to create large-scale
 
 # Creating a set for validation
 
-The paradigm here is only having training and validation. We hold out a parquet file for validation. I had been using perplexity but I want to add some additional tests.
+The paradigm here is only having training and validation. We hold out a parquet file for validation. I had been using perplexity but I want to add some additional tests. I have started with a set of sentence completions that will be printed. This required adding a predict function to the model to make autoregressive temperature-normalized predictions until a max token limit. I also have started to add the rest of the ~1k parquet files to my machine which required increasing the storage size. 

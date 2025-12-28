@@ -38,16 +38,13 @@ class LightningGPT(pl.LightningModule):
         self.log('train_loss', loss, prog_bar=True, sync_dist=True)
         self.log('flops_so_far', flops_so_far, prog_bar=False, sync_dist=True)
 
-        # Log optimizer parameters
         optimizer = self.optimizers()
         if optimizer is not None:
-            # Log learning rates for each parameter group
             param_groups = optimizer.param_groups
             self.log('lr/head', param_groups[0]['lr'], prog_bar=False, sync_dist=True)
             self.log('lr/embeddings', param_groups[1]['lr'], prog_bar=False, sync_dist=True)
             self.log('lr/other', param_groups[2]['lr'], prog_bar=False, sync_dist=True)
 
-            # Log scheduler progress
             current_step = self.global_step
             max_steps = self.trainer.max_steps
             warmup_steps = int(self.hparams.warmup_ratio * max_steps)
@@ -76,15 +73,13 @@ class LightningGPT(pl.LightningModule):
         return loss
 
     def on_validation_epoch_end(self):
-        """Run sentence completion at the end of each validation epoch."""
-        # Only run on rank 0 to avoid duplicate outputs
         if self.trainer.global_rank == 0:
             run_sentence_completion(
                 self.model,
                 self.tokenizer,
                 device=self.device,
                 max_new_tokens=50,
-                temperature=0.8,
+                temperature=1.0,
                 top_k=40
             )
     
@@ -180,10 +175,8 @@ def train_gpt(
     # Logging parameters
     wandb_project = "llm-chat"
     wandb_enabled = True
-    # Get distributed info (will be correct after DDP spawns processes)
     is_ddp, rank, local_rank, world_size = get_dist_info()
 
-    # Print distributed info
     print0("=== Training Configuration ===")
     print0(f"DDP Mode: {is_ddp}")
     if is_ddp:
@@ -192,10 +185,8 @@ def train_gpt(
     accelerator = "gpu" if torch.cuda.is_available() else "cpu"
     if devices is None:
         devices = torch.cuda.device_count() if torch.cuda.is_available() else 1
-
     print0(f"Accelerator: {accelerator}")
     print0(f"Devices: {devices}")
-
     torch.set_float32_matmul_precision('medium')
 
     # Logger
@@ -245,9 +236,9 @@ def train_gpt(
 
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    
     print0(f"Total parameters: {total_params:,}")
     print0(f"Trainable parameters: {trainable_params:,}")
-    
     print0("\n=== Training Settings ===")
     print0(f"Max steps: {max_steps}")
     print0(f"Eval every: {eval_every} steps")
