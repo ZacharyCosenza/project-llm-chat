@@ -5,7 +5,7 @@ from pytorch_lightning.loggers import WandbLogger
 from transformers import AutoTokenizer
 from core.dataloader import simple_dataloader, tokenizing_dataloader
 from core.utils import print0, get_dist_info
-from core.validation import run_sentence_completion
+from core.validation import run_sentence_completion, run_world_knowledge_validation
 from core.models import TinyGPT
 
 class LightningGPT(pl.LightningModule):
@@ -73,6 +73,8 @@ class LightningGPT(pl.LightningModule):
         return loss
 
     def on_validation_epoch_end(self):
+
+        # Some validations are just sanity checks/prints
         if self.trainer.global_rank == 0:
             run_sentence_completion(
                 self.model,
@@ -82,6 +84,23 @@ class LightningGPT(pl.LightningModule):
                 temperature=1.0,
                 top_k=40
             )
+
+            # Other validations are recorded in log
+            validation_results = run_world_knowledge_validation(
+                self.model,
+                self.tokenizer,
+                device=self.device,
+                max_new_tokens=20,
+                temperature=0.3,
+                top_k=40
+            )
+
+            if self.logger is not None:
+                self.logger.experiment.log({
+                    "world_knowledge/accuracy": validation_results["accuracy"],
+                    "world_knowledge/token_f1": validation_results["token_f1"],
+                    "global_step": self.global_step
+                })
     
     def configure_optimizers(self):
         embedding_params = list(self.model.tok_emb.parameters()) + list(self.model.pos_emb.parameters())
@@ -291,9 +310,6 @@ def train_gpt(
     trainer.fit(model)
 
     print0("\n=== Training Complete ===")
-    if torch.cuda.is_available():
-        max_memory_mb = torch.cuda.max_memory_allocated() / (1024 ** 2)
-        print0(f"Peak GPU memory: {max_memory_mb:.2f} MB")
 
     return model, trainer
 
