@@ -71,7 +71,6 @@ class LightningGPT(pl.LightningModule):
 
         self.log('val_loss', loss, prog_bar=True, sync_dist=True)
         self.log('val_perplexity', perplexity, sync_dist=True)
-        return loss
 
     def on_validation_epoch_end(self):
 

@@ -71,9 +71,12 @@ def tokenizing_dataloader(tokenizer, B, T, split="train", device=None, resume_st
                 for text in texts:
                     tokens = tokenizer.encode(text, add_special_tokens=True, max_length=2048, truncation=True)
                     token_buffer.extend(tokens)
+                    
                     # Limit buffer size to avoid excessive memory usage
                     if len(token_buffer) >= needed_tokens * 2:
                         break
+                if len(token_buffer) >= needed_tokens * 2:
+                    break
 
             # Pop exact tokens needed
             tokens = [token_buffer.popleft() for _ in range(needed_tokens)]
