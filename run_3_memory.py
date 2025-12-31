@@ -173,13 +173,15 @@ def train_gpt(
     val_max_steps=2,
     smoke_test=False,
     wandb_name=None,
-    memory_log_every=10,
-    memory_detailed_every=100
 ):
     # Model architecture parameters
     n_layers = 20
     dim = n_layers * 64
     n_heads = max(1, (dim + 127) // 128)
+
+    # Memory logging
+    memory_log_every = 10
+    memory_detailed_every = 100
 
     # Optimizer parameters
     base_lr = 1e-3
@@ -354,8 +356,6 @@ if __name__ == "__main__":
     parser.add_argument("--val_max_steps", type=int, default=10, help="Maximum validation steps")
     parser.add_argument("--smoke_test", action="store_true", help="Run smoke test (fast dev run)")
     parser.add_argument("--wandb_name", type=str, default="test", help="Weights & Biases run name")
-    parser.add_argument("--memory_log_every", type=int, default=10, help="Log memory every N steps")
-    parser.add_argument("--memory_detailed_every", type=int, default=100, help="Detailed memory logging every N steps")
 
     args = parser.parse_args()
 
@@ -366,6 +366,4 @@ if __name__ == "__main__":
         val_max_steps=args.val_max_steps,
         smoke_test=args.smoke_test,
         wandb_name=args.wandb_name,
-        memory_log_every=args.memory_log_every,
-        memory_detailed_every=args.memory_detailed_every
     )
