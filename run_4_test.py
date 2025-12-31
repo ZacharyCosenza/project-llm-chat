@@ -268,35 +268,59 @@ class LLMModule(pl.LightningModule):
 
 
 if __name__ == "__main__":
+    import argparse
     from transformers import AutoTokenizer
     from pytorch_lightning.loggers import WandbLogger
 
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Train TinyGPT model')
+    parser.add_argument('--batch_size', type=int, default=1, help='Batch size for training')
+    parser.add_argument('--max_steps', type=int, default=100000, help='Maximum training steps')
+    parser.add_argument('--smoke_test', action='store_true', help='Run a quick smoke test with reduced steps')
+    args = parser.parse_args()
+
+    # Override max_steps if smoke_test is enabled
+    if args.smoke_test:
+        max_steps = 100
+        val_check_interval = 50
+        print("Running in smoke test mode: max_steps=100, val_check_interval=50")
+    else:
+        max_steps = args.max_steps
+        val_check_interval = 1000
+
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
-    
+
+    # Model architecture parameters
+    n_layers = 20
+    max_seq_len = 2048
+    batch_size = args.batch_size
+    dim = n_layers * 64
+    n_heads = max(1, (dim + 127) // 128)
+
     model = TinyGPT(
         vocab_size=tokenizer.vocab_size,
-        dim=512,
-        n_layers=6,
-        n_heads=8,
-        max_seq_len=2048
+        dim=dim,
+        n_layers=n_layers,
+        n_heads=n_heads,
+        max_seq_len=max_seq_len
     )
-    
+
     num_params = sum(p.numel() for p in model.parameters())
     flops_per_token = model.estimate_flops(2048)
     print(f"Parameters: {num_params:,}")
     print(f"FLOPs/token: {flops_per_token:,}")
 
-    llm_module = LLMModule(model, tokenizer, lr=3e-4, max_steps=100000)
+    llm_module = LLMModule(model, tokenizer, lr=3e-4, max_steps=max_steps)
     data_module = LLMDataModule(
         train_dir="/path/to/train_parquets",
         val_dir="/path/to/val_parquets",
         tokenizer=tokenizer,
-        batch_size=8,
-        seq_length=2048,
+        batch_size=batch_size,
+        seq_length=max_seq_len,
         num_workers=4,
         val_sequences=1000
     )
-    
+
     # Auto-detect available devices
     if torch.cuda.is_available():
         num_gpus = torch.cuda.device_count()
@@ -324,17 +348,18 @@ if __name__ == "__main__":
             "model_params": num_params,
             "flops_per_token": flops_per_token,
             "vocab_size": tokenizer.vocab_size,
-            "dim": 512,
-            "n_layers": 6,
-            "n_heads": 8,
-            "max_seq_len": 2048,
-            "batch_size": 8,
-            "seq_length": 2048,
+            "dim": dim,
+            "n_layers": n_layers,
+            "n_heads": n_heads,
+            "max_seq_len": max_seq_len,
+            "batch_size": batch_size,
+            "seq_length": max_seq_len,
             "lr": 3e-4,
-            "max_steps": 100000,
+            "max_steps": max_steps,
             "accelerator": accelerator,
             "devices": devices,
             "strategy": strategy,
+            "smoke_test": args.smoke_test,
         }
     )
 
@@ -343,11 +368,11 @@ if __name__ == "__main__":
         devices=devices,
         strategy=strategy,
         precision='bf16-mixed' if accelerator == 'gpu' else '32',
-        max_steps=100000,
+        max_steps=max_steps,
         gradient_clip_val=1.0,
         accumulate_grad_batches=4,
         log_every_n_steps=10,
-        val_check_interval=1000,
+        val_check_interval=val_check_interval,
         logger=wandb_logger,  # Add wandb logger
     )
 
