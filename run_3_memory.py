@@ -66,7 +66,7 @@ class LightningGPT(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         x, y = batch
         logits = self(x)
-        loss = F.cross_entropy(logits.reshape(-1, self.hparams.vocab_size), y.reshape(-1))
+        loss = F.cross_entropy(logits.reshape(-1, self.hparams.vocab_size), y.reshape(-1)).item()
         perplexity = torch.exp(loss)
 
         self.log('val_loss', loss, prog_bar=True, sync_dist=True)
@@ -185,7 +185,6 @@ def train_gpt(
 
     # Memory logging
     memory_log_every = 1
-    memory_detailed_every = 100
 
     # Optimizer parameters
     base_lr = 1e-3
@@ -296,7 +295,6 @@ def train_gpt(
     print0(f"Precision: {'bf16-mixed' if accelerator == 'gpu' else '32-true'}")
     print0(f"Smoke test: {smoke_test}")
     print0(f"Memory logging: every {memory_log_every} steps")
-    print0(f"Detailed memory logging: every {memory_detailed_every} steps")
     print0("\n=== Optimizer Settings ===")
     lr_scale = (dim / 768) ** -0.5
     print0(f"Base LR: {base_lr}")
@@ -323,10 +321,7 @@ def train_gpt(
     print0("\n=== Starting Training ===\n")
 
     # Create memory logging callback
-    memory_callback = MemoryLoggingCallback(
-        log_every_n_steps=memory_log_every,
-        detailed_every_n_steps=memory_detailed_every
-    )
+    memory_callback = MemoryLoggingCallback(log_every_n_steps=memory_log_every)
 
     trainer = pl.Trainer(
         max_steps=max_steps,
