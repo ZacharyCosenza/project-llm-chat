@@ -271,6 +271,7 @@ if __name__ == "__main__":
     import argparse
     from transformers import AutoTokenizer
     from pytorch_lightning.loggers import WandbLogger
+    from core.memory_tracker import MemoryLoggingCallback, estimate_tensor_memory
 
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Train TinyGPT model')
@@ -309,6 +310,25 @@ if __name__ == "__main__":
     flops_per_token = model.estimate_flops(2048)
     print(f"Parameters: {num_params:,}")
     print(f"FLOPs/token: {flops_per_token:,}")
+
+    # Memory estimation
+    if torch.cuda.is_available():
+        print("\n=== Memory Estimation ===")
+        grad_accum_steps = 4
+        memory_estimate = estimate_tensor_memory(
+            model,
+            batch_size * grad_accum_steps,  # Effective batch size
+            max_seq_len,
+            tokenizer.vocab_size,
+            dtype=torch.bfloat16  # Using bf16-mixed
+        )
+        print(f"Parameters: {memory_estimate['parameters_mb']:.2f} MB")
+        print(f"Gradients: {memory_estimate['gradients_mb']:.2f} MB")
+        print(f"Optimizer State: {memory_estimate['optimizer_state_mb']:.2f} MB")
+        print(f"Activations (est): {memory_estimate['activations_mb']:.2f} MB")
+        print(f"Data (per batch): {memory_estimate['data_mb']:.2f} MB")
+        print(f"Logits (per batch): {memory_estimate['logits_mb']:.2f} MB")
+        print(f"Total Estimated: {memory_estimate['total_estimated_mb']:.2f} MB")
 
     llm_module = LLMModule(model, tokenizer, lr=3e-4, max_steps=max_steps)
     data_module = LLMDataModule(
@@ -363,6 +383,9 @@ if __name__ == "__main__":
         }
     )
 
+    # Create memory logging callback
+    memory_callback = MemoryLoggingCallback(log_every_n_steps=10)
+
     trainer = pl.Trainer(
         accelerator=accelerator,
         devices=devices,
@@ -376,6 +399,7 @@ if __name__ == "__main__":
         logger=wandb_logger,  # Add wandb logger
         enable_progress_bar=True,
         enable_model_summary=True,
+        callbacks=[memory_callback],
     )
 
     trainer.fit(llm_module, data_module)
