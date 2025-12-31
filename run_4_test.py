@@ -193,9 +193,13 @@ class LLMModule(pl.LightningModule):
     
     def training_step(self, batch, batch_idx):
         loss, _, _ = self._compute_loss(batch)
-        self.log('train_loss', loss, prog_bar=True, sync_dist=True)
+        self.log('train/loss', loss, prog_bar=True, sync_dist=True)
 
-        # Log memory usage to wandb
+        # Log learning rate
+        current_lr = self.trainer.optimizers[0].param_groups[0]['lr']
+        self.log('train/lr', current_lr, prog_bar=True, sync_dist=False)
+
+        # Log memory usage
         if torch.cuda.is_available():
             memory_allocated = torch.cuda.memory_allocated() / 1024**3  # Convert to GB
             memory_reserved = torch.cuda.memory_reserved() / 1024**3  # Convert to GB
@@ -212,21 +216,29 @@ class LLMModule(pl.LightningModule):
         ppl = torch.exp(loss)
         preds = logits.argmax(dim=-1)
         acc = (preds == labels).float().mean()
-        
-        self.log('val_loss', loss, prog_bar=True, sync_dist=True)
-        self.log('val_ppl', ppl, prog_bar=True, sync_dist=True)
-        self.log('val_acc', acc, prog_bar=True, sync_dist=True)
+
+        self.log('val/loss', loss, prog_bar=True, sync_dist=True)
+        self.log('val/perplexity', ppl, prog_bar=True, sync_dist=True)
+        self.log('val/accuracy', acc, prog_bar=True, sync_dist=True)
         return loss
     
     def on_validation_epoch_end(self):
         # Generate sample text on rank 0
         if self.global_rank == 0:
             self.model.eval()
-            prompt = torch.tensor([[self.tokenizer.bos_token_id or self.tokenizer.eos_token_id]], 
+            prompt = torch.tensor([[self.tokenizer.bos_token_id or self.tokenizer.eos_token_id]],
                                   device=self.device)
             generated = self.model.predict(prompt, max_new_tokens=50, temperature=0.8, top_k=40)
             text = self.tokenizer.decode(generated[0].tolist())
             self.print(f"\n[Sample] {text}\n")
+
+            # Log generated text to wandb
+            if self.logger:
+                self.logger.log_text(
+                    key="generated_samples",
+                    columns=["step", "generated_text"],
+                    data=[[self.global_step, text]]
+                )
     
     def configure_optimizers(self):
         decay_params, no_decay_params = [], []
@@ -257,7 +269,8 @@ class LLMModule(pl.LightningModule):
 
 if __name__ == "__main__":
     from transformers import AutoTokenizer
-    
+    from pytorch_lightning.loggers import WandbLogger
+
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
     
     model = TinyGPT(
@@ -268,9 +281,11 @@ if __name__ == "__main__":
         max_seq_len=2048
     )
     
-    print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
-    print(f"FLOPs/token: {model.estimate_flops(2048):,}")
-    
+    num_params = sum(p.numel() for p in model.parameters())
+    flops_per_token = model.estimate_flops(2048)
+    print(f"Parameters: {num_params:,}")
+    print(f"FLOPs/token: {flops_per_token:,}")
+
     llm_module = LLMModule(model, tokenizer, lr=3e-4, max_steps=100000)
     data_module = LLMDataModule(
         train_dir="/path/to/train_parquets",
@@ -300,6 +315,29 @@ if __name__ == "__main__":
         strategy = 'auto'
         print("No GPU detected, using CPU")
 
+    # Initialize wandb logger
+    wandb_logger = WandbLogger(
+        project="llm-training",  # Change this to your project name
+        name=f"tinygpt-{num_params//1000}k-params",
+        log_model=True,  # Log model checkpoints to wandb
+        config={
+            "model_params": num_params,
+            "flops_per_token": flops_per_token,
+            "vocab_size": tokenizer.vocab_size,
+            "dim": 512,
+            "n_layers": 6,
+            "n_heads": 8,
+            "max_seq_len": 2048,
+            "batch_size": 8,
+            "seq_length": 2048,
+            "lr": 3e-4,
+            "max_steps": 100000,
+            "accelerator": accelerator,
+            "devices": devices,
+            "strategy": strategy,
+        }
+    )
+
     trainer = pl.Trainer(
         accelerator=accelerator,
         devices=devices,
@@ -310,6 +348,7 @@ if __name__ == "__main__":
         accumulate_grad_batches=4,
         log_every_n_steps=10,
         val_check_interval=1000,
+        logger=wandb_logger,  # Add wandb logger
     )
-    
+
     trainer.fit(llm_module, data_module)
