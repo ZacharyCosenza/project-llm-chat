@@ -66,7 +66,7 @@ class LightningGPT(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         x, y = batch
         logits = self(x)
-        loss = F.cross_entropy(logits.reshape(-1, self.hparams.vocab_size), y.reshape(-1)).item()
+        loss = F.cross_entropy(logits.reshape(-1, self.hparams.vocab_size), y.reshape(-1))
         perplexity = torch.exp(loss)
 
         self.log('val_loss', loss, prog_bar=True, sync_dist=True)
