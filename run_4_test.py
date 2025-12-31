@@ -93,6 +93,7 @@ class StreamingParquetDataset(IterableDataset):
         
         total_shards = self.world_size * num_workers
         shard_id = self.rank * num_workers + worker_id
+        print(f"Rank {self.rank}, shard_id {shard_id}, total_shards {total_shards}, num_files {len(self.files)}")
         
         files = self.files.copy()
         if self.shuffle:
@@ -100,11 +101,11 @@ class StreamingParquetDataset(IterableDataset):
         
         buffer = deque()
         sequences_yielded = 0
-        file_iter = cycle(files) if self.max_sequences else iter(files)
         
-        for file_idx, filepath in enumerate(file_iter):
+        for file_idx in cycle(range(len(files))) if self.max_sequences else range(len(files)):
             if file_idx % total_shards != shard_id:
                 continue
+            filepath = files[file_idx]
             
             pf = pq.ParquetFile(filepath)
             for rg_idx in range(pf.metadata.num_row_groups):
