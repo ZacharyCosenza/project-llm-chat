@@ -8,6 +8,7 @@ from pathlib import Path
 from itertools import cycle
 from collections import deque
 import random
+import wandb
 
 
 class TinyGPT(nn.Module):
@@ -193,6 +194,17 @@ class LLMModule(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         loss, _, _ = self._compute_loss(batch)
         self.log('train_loss', loss, prog_bar=True, sync_dist=True)
+
+        # Log memory usage to wandb
+        if torch.cuda.is_available():
+            memory_allocated = torch.cuda.memory_allocated() / 1024**3  # Convert to GB
+            memory_reserved = torch.cuda.memory_reserved() / 1024**3  # Convert to GB
+            memory_cached = torch.cuda.max_memory_allocated() / 1024**3  # Convert to GB
+
+            self.log('memory/allocated_gb', memory_allocated, prog_bar=False, sync_dist=False)
+            self.log('memory/reserved_gb', memory_reserved, prog_bar=False, sync_dist=False)
+            self.log('memory/max_allocated_gb', memory_cached, prog_bar=False, sync_dist=False)
+
         return loss
     
     def validation_step(self, batch, batch_idx):
