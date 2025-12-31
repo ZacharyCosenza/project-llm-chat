@@ -318,7 +318,7 @@ if __name__ == "__main__":
         batch_size=batch_size,
         seq_length=max_seq_len,
         num_workers=4,
-        val_sequences=1000
+        val_sequences=10
     )
 
     # Auto-detect available devices
@@ -374,6 +374,8 @@ if __name__ == "__main__":
         log_every_n_steps=10,
         val_check_interval=val_check_interval,
         logger=wandb_logger,  # Add wandb logger
+        enable_progress_bar=True,
+        enable_model_summary=True,
     )
 
     trainer.fit(llm_module, data_module)
