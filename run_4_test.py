@@ -270,11 +270,29 @@ if __name__ == "__main__":
         val_sequences=1000
     )
     
+    # Auto-detect available devices
+    if torch.cuda.is_available():
+        num_gpus = torch.cuda.device_count()
+        accelerator = 'gpu'
+        devices = num_gpus
+        strategy = 'ddp' if num_gpus > 1 else 'auto'
+        print(f"Detected {num_gpus} GPU(s): {[torch.cuda.get_device_name(i) for i in range(num_gpus)]}")
+    elif torch.backends.mps.is_available():
+        accelerator = 'mps'
+        devices = 1
+        strategy = 'auto'
+        print("Detected Apple MPS device")
+    else:
+        accelerator = 'cpu'
+        devices = 1
+        strategy = 'auto'
+        print("No GPU detected, using CPU")
+
     trainer = pl.Trainer(
-        accelerator='gpu',
-        devices=4,
-        strategy='ddp',
-        precision='bf16-mixed',
+        accelerator=accelerator,
+        devices=devices,
+        strategy=strategy,
+        precision='bf16-mixed' if accelerator == 'gpu' else '32',
         max_steps=100000,
         gradient_clip_val=1.0,
         accumulate_grad_batches=4,
