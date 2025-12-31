@@ -37,7 +37,7 @@ class LightningGPT(pl.LightningModule):
         _, _, _, world_size = get_dist_info()
         flops_so_far = self.flops_per_token * B * T * world_size * (self.global_step + 1)
         self.log('train_loss', loss, prog_bar=True, sync_dist=True)
-        self.log('flops_so_far', flops_so_far, prog_bar=False, sync_dist=True)
+        self.log('flops_so_far', float(flops_so_far), prog_bar=False, sync_dist=True)
 
         optimizer = self.optimizers()
         if optimizer is not None:
@@ -97,11 +97,15 @@ class LightningGPT(pl.LightningModule):
             )
 
             if self.logger is not None:
+                # Log only scalar values to avoid tensor retention
                 self.logger.experiment.log({
-                    "world_knowledge/accuracy": validation_results["accuracy"],
-                    "world_knowledge/token_f1": validation_results["token_f1"],
+                    "world_knowledge/accuracy": validation_results["accuracy"],  # Already converted to float in validation.py
+                    "world_knowledge/token_f1": validation_results["token_f1"],  # Already converted to float in validation.py
                     "global_step": self.global_step
                 })
+
+            # Clean up validation results to free memory
+            del validation_results
 
     def configure_optimizers(self):
         embedding_params = list(self.model.tok_emb.parameters()) + list(self.model.pos_emb.parameters())
@@ -180,7 +184,7 @@ def train_gpt(
     n_heads = max(1, (dim + 127) // 128)
 
     # Memory logging
-    memory_log_every = 10
+    memory_log_every = 1
     memory_detailed_every = 100
 
     # Optimizer parameters

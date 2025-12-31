@@ -21,20 +21,29 @@ def run_sentence_completion(model, tokenizer, device="cuda", max_new_tokens=50, 
 
     model.eval()
 
-    for i, prompt in enumerate(prompts):
-        encoded = tokenizer.encode(prompt, return_tensors="pt").to(device)
-        completed = model.predict(
-            encoded,
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            top_k=top_k
-        )
-        completion_text = tokenizer.decode(completed[0], skip_special_tokens=True)
+    with torch.no_grad():  # Prevent gradient computation during validation
+        for i, prompt in enumerate(prompts):
+            encoded = tokenizer.encode(prompt, return_tensors="pt").to(device)
+            completed = model.predict(
+                encoded,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_k=top_k
+            )
+            completion_text = tokenizer.decode(completed[0], skip_special_tokens=True)
 
-        print0(f"\n[{i+1}/{len(prompts)}] Prompt: '{prompt}'")
-        print0(f"Completion: {completion_text}")
-        print0("-" * 80)
+            print0(f"\n[{i+1}/{len(prompts)}] Prompt: '{prompt}'")
+            print0(f"Completion: {completion_text}")
+            print0("-" * 80)
+
+            # Clean up GPU tensors immediately
+            del encoded, completed
+
     print0("="*80 + "\n")
+
+    # Clear GPU cache after validation
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     model.train()
 
@@ -98,28 +107,32 @@ def run_world_knowledge_validation(model, tokenizer, device="cuda", max_new_toke
     all_prompts = []
 
     # Generate predictions for all test cases
-    for i, test_case in enumerate(test_cases):
-        prompt = test_case["prompt"]
-        expected = test_case["expected"]
+    with torch.no_grad():  # Prevent gradient computation during validation
+        for i, test_case in enumerate(test_cases):
+            prompt = test_case["prompt"]
+            expected = test_case["expected"]
 
-        encoded = tokenizer.encode(prompt, return_tensors="pt").to(device)
-        completed = model.predict(
-            encoded,
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            top_k=top_k
-        )
-        prediction = tokenizer.decode(completed[0], skip_special_tokens=True)
+            encoded = tokenizer.encode(prompt, return_tensors="pt").to(device)
+            completed = model.predict(
+                encoded,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_k=top_k
+            )
+            prediction = tokenizer.decode(completed[0], skip_special_tokens=True)
 
-        all_predictions.append(prediction)
-        all_references.append(expected)
-        all_prompts.append(prompt)
+            all_predictions.append(prediction)
+            all_references.append(expected)
+            all_prompts.append(prompt)
 
-        print0(f"\n[{i+1}/{len(test_cases)}]")
-        print0(f"Prompt:    '{prompt}'")
-        print0(f"Expected:  '{expected}'")
-        print0(f"Generated: '{prediction}'")
-        print0("-" * 80)
+            print0(f"\n[{i+1}/{len(test_cases)}]")
+            print0(f"Prompt:    '{prompt}'")
+            print0(f"Expected:  '{expected}'")
+            print0(f"Generated: '{prediction}'")
+            print0("-" * 80)
+
+            # Clean up GPU tensors immediately
+            del encoded, completed
 
     # Calculate metrics
     print0("\n" + "="*80)
@@ -209,12 +222,19 @@ def run_world_knowledge_validation(model, tokenizer, device="cuda", max_new_toke
 
     print0("\n" + "="*80 + "\n")
 
+    # Clean up metric objects to free memory (especially BERTScore model)
+    del bleu_metric, rouge_metric, meteor_metric, bertscore_metric
+
+    # Clear GPU cache after validation
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     model.train()
 
     return {
         "predictions": all_predictions,
         "references": all_references,
         "prompts": all_prompts,
-        "accuracy": accuracy,
-        "token_f1": avg_token_f1,
+        "accuracy": float(accuracy),  # Convert to Python scalar
+        "token_f1": float(avg_token_f1),  # Convert to Python scalar
     }
