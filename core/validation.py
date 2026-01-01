@@ -21,6 +21,8 @@ def run_sentence_completion(model, tokenizer, device="cuda", max_new_tokens=50, 
 
     model.eval()
 
+    completions = []
+
     with torch.no_grad():  # Prevent gradient computation during validation
         for i, prompt in enumerate(prompts):
             encoded = tokenizer.encode(prompt, return_tensors="pt").to(device)
@@ -36,6 +38,11 @@ def run_sentence_completion(model, tokenizer, device="cuda", max_new_tokens=50, 
             print0(f"Completion: {completion_text}")
             print0("-" * 80)
 
+            completions.append({
+                "prompt": prompt,
+                "completion": completion_text
+            })
+
             # Clean up GPU tensors immediately
             del encoded, completed
 
@@ -46,6 +53,8 @@ def run_sentence_completion(model, tokenizer, device="cuda", max_new_tokens=50, 
         torch.cuda.empty_cache()
 
     model.train()
+
+    return completions
 
 
 def run_world_knowledge_validation(model, tokenizer, device="cuda", max_new_tokens=20, temperature=0.3, top_k=40):
@@ -139,12 +148,16 @@ def run_world_knowledge_validation(model, tokenizer, device="cuda", max_new_toke
     print0("AGGREGATE METRICS")
     print0("="*80 + "\n")
 
+    # Initialize metrics dictionary
+    metrics = {}
+
     # BLEU Score
     try:
         bleu_results = bleu_metric.compute(
             predictions=all_predictions,
             references=[[ref] for ref in all_references]
         )
+        metrics['bleu_score'] = float(bleu_results['bleu'])
         print0(f"BLEU Score: {bleu_results['bleu']:.4f}")
         print0(f"  - BLEU-1: {bleu_results['precisions'][0]:.4f}")
         print0(f"  - BLEU-2: {bleu_results['precisions'][1]:.4f}")
@@ -152,6 +165,7 @@ def run_world_knowledge_validation(model, tokenizer, device="cuda", max_new_toke
         print0(f"  - BLEU-4: {bleu_results['precisions'][3]:.4f}")
     except Exception as e:
         print0(f"BLEU calculation failed: {e}")
+        metrics['bleu_score'] = 0.0
 
     # ROUGE Score
     try:
@@ -159,12 +173,18 @@ def run_world_knowledge_validation(model, tokenizer, device="cuda", max_new_toke
             predictions=all_predictions,
             references=all_references
         )
+        metrics['rouge1'] = float(rouge_results['rouge1'])
+        metrics['rouge2'] = float(rouge_results['rouge2'])
+        metrics['rougeL'] = float(rouge_results['rougeL'])
         print0(f"\nROUGE Scores:")
         print0(f"  - ROUGE-1: {rouge_results['rouge1']:.4f}")
         print0(f"  - ROUGE-2: {rouge_results['rouge2']:.4f}")
         print0(f"  - ROUGE-L: {rouge_results['rougeL']:.4f}")
     except Exception as e:
         print0(f"ROUGE calculation failed: {e}")
+        metrics['rouge1'] = 0.0
+        metrics['rouge2'] = 0.0
+        metrics['rougeL'] = 0.0
 
     # METEOR Score
     try:
@@ -172,9 +192,11 @@ def run_world_knowledge_validation(model, tokenizer, device="cuda", max_new_toke
             predictions=all_predictions,
             references=all_references
         )
+        metrics['meteor_score'] = float(meteor_results['meteor'])
         print0(f"\nMETEOR Score: {meteor_results['meteor']:.4f}")
     except Exception as e:
         print0(f"METEOR calculation failed: {e}")
+        metrics['meteor_score'] = 0.0
 
     # BERTScore
     try:
@@ -187,16 +209,24 @@ def run_world_knowledge_validation(model, tokenizer, device="cuda", max_new_toke
         avg_recall = np.mean(bertscore_results['recall'])
         avg_f1 = np.mean(bertscore_results['f1'])
 
+        metrics['bertscore_precision'] = float(avg_precision)
+        metrics['bertscore_recall'] = float(avg_recall)
+        metrics['bertscore_f1'] = float(avg_f1)
+
         print0(f"\nBERTScore:")
         print0(f"  - Precision: {avg_precision:.4f}")
         print0(f"  - Recall:    {avg_recall:.4f}")
         print0(f"  - F1:        {avg_f1:.4f}")
     except Exception as e:
         print0(f"BERTScore calculation failed: {e}")
+        metrics['bertscore_precision'] = 0.0
+        metrics['bertscore_recall'] = 0.0
+        metrics['bertscore_f1'] = 0.0
 
     # Exact Match Accuracy
     exact_matches = sum(1 for pred, ref in zip(all_predictions, all_references) if pred.strip() == ref.strip())
     accuracy = exact_matches / len(all_predictions)
+    metrics['accuracy'] = float(accuracy)
     print0(f"\nExact Match Accuracy: {accuracy:.4f} ({exact_matches}/{len(all_predictions)})")
 
     # Token-level F1 (simple implementation)
@@ -218,6 +248,7 @@ def run_world_knowledge_validation(model, tokenizer, device="cuda", max_new_toke
         total_f1 += f1
 
     avg_token_f1 = total_f1 / len(all_predictions)
+    metrics['token_f1'] = float(avg_token_f1)
     print0(f"Average Token-level F1: {avg_token_f1:.4f}")
 
     print0("\n" + "="*80 + "\n")
@@ -235,6 +266,5 @@ def run_world_knowledge_validation(model, tokenizer, device="cuda", max_new_toke
         "predictions": all_predictions,
         "references": all_references,
         "prompts": all_prompts,
-        "accuracy": float(accuracy),  # Convert to Python scalar
-        "token_f1": float(avg_token_f1),  # Convert to Python scalar
+        "metrics": metrics,
     }

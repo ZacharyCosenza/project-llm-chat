@@ -12,7 +12,7 @@ class TinyGPT(nn.Module):
             nn.TransformerEncoderLayer(
                 d_model=dim, 
                 nhead=n_heads, 
-                dim_feedforward=dim,
+                dim_feedforward=dim * 4,
                 batch_first=True,
                 norm_first=True
             ) for _ in range(n_layers)
@@ -22,12 +22,11 @@ class TinyGPT(nn.Module):
         self.head = nn.Linear(dim, vocab_size, bias=False)
     
     def estimate_flops(self, sequence_len):
-        """ Return the estimated FLOPs per token for the model. Ref: https://arxiv.org/abs/2204.02311 """
         nparams = sum(p.numel() for p in self.parameters())
         nparams_embedding = self.tok_emb.weight.numel() + self.pos_emb.weight.numel()
-        l = len(self.blocks)  # n_layers
-        h = self.blocks[0].self_attn.num_heads  # n_heads
-        q = self.blocks[0].self_attn.embed_dim // h  # head_dim (dim // n_heads)
+        l = len(self.blocks)
+        h = self.blocks[0].self_attn.num_heads
+        q = self.blocks[0].self_attn.embed_dim // h
         t = sequence_len
         num_flops_per_token = 6 * (nparams - nparams_embedding) + 12 * l * h * q * t
         return num_flops_per_token 

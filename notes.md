@@ -40,7 +40,12 @@ Let's start understanding the datasets. In K's code the download process is kick
 
 # Scaling up
 
-One of the critical aspect of this study is to examine how to create large-scale ML experiments. With K's batch size of 32, token size of 2048, and ~400M parameter model, this is a small-scale LLM project but fairly large-scale project relative to the things I have done. Stealing K's dataloader allowed me to do this on 8 A40 GPUs (distribute samples according to rank, stream etc), and easily run experiments with fewer GPUs. Trying to simplify the dataloader to use a more classic pytorch dataloader resulted in OOM errors even at smaller batch sizes and smaller context length. In future I would like to keep track of both RAM and VRAM memory before and during training (memory is du -h /workspace | sort -h | tail -20). I sometimes still get OOM issues so this will be an ongoing thing, including memory issues during training.
+One of the critical aspect of this study is to examine how to create large-scale ML experiments. With K's batch size of 32, token size of 2048, and ~400M parameter model, this is a small-scale LLM project but fairly large-scale project relative to the things I have done. Stealing K's dataloader allowed me to do this on 8 A40 GPUs (distribute samples according to rank, stream etc), and easily run experiments with fewer GPUs. Trying to simplify the dataloader to use a more classic pytorch dataloader resulted in OOM errors even at smaller batch sizes and smaller context length, so clearly the dataset is too large to hold in memory. I went on to keep closer track of VRAM during training using torch.cuda. After logging memory usage I realized allocated and reserved memory increase monotonically, indicating leakage somewhere (see image below).
+
+[Figure 1](/images/fig1_badmemory.webp)
+
+Helpful commands for RAM: du -h /workspace | sort -h | tail -20
+Helpful scripts for VRAM: torch.cuda.memory_allocated(device), torch.cuda.memory_reserved(device)
 
 # Creating a set for validation
 
