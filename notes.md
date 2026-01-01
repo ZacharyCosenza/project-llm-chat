@@ -47,6 +47,12 @@ One of the critical aspect of this study is to examine how to create large-scale
 Helpful commands for RAM: du -h /workspace | sort -h | tail -20
 Helpful scripts for VRAM: torch.cuda.memory_allocated(device), torch.cuda.memory_reserved(device)
 
+I also had Claude rewrite the entire script, using the loading of parquet files as a starting point, and that seems to help (see below). 
+
+[Figure 2](/images/fig2_goodmemory.png)
+
+However, I am still running into an issue where, under certain conditions like various number of GPUs, the script itself starts but hangs.
+
 # Creating a set for validation
 
 The paradigm here is only having training and validation. We hold out a parquet file for validation. I had been using perplexity but I want to add some additional tests. I have started with a set of sentence completions that will be printed as well as some basic world knowledge compeltion tasks. This required adding a predict function to the model to make autoregressive temperature-normalized predictions until a max token limit. I also have started to add the rest of the ~1k parquet files to my machine which required increasing the storage size. 

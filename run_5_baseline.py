@@ -237,7 +237,7 @@ if __name__ == "__main__":
         num_gpus = torch.cuda.device_count()
         accelerator = 'gpu'
         devices = num_gpus
-        strategy = 'ddp' if num_gpus > 1 else 'auto'
+        strategy = 'auto'
         print0(f"Detected {num_gpus} GPU(s): {[torch.cuda.get_device_name(i) for i in range(num_gpus)]}")
     elif torch.backends.mps.is_available():
         accelerator = 'mps'
