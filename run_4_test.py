@@ -130,8 +130,8 @@ class LLMDataModule(pl.LightningDataModule):
     def __init__(self, train_dir: str, val_dir: str, tokenizer, batch_size: int = 8,
                  seq_length: int = 2048, num_workers: int = 4, val_sequences: int = 1000):
         super().__init__()
-        self.train_dir = 'data/base_data'
-        self.val_dir = 'data/base_data'
+        self.train_dir = train_dir
+        self.val_dir = val_dir
         self.tokenizer = tokenizer
         self.batch_size = batch_size
         self.seq_length = seq_length
@@ -333,8 +333,8 @@ if __name__ == "__main__":
 
     llm_module = LLMModule(model, tokenizer, lr=3e-4, max_steps=max_steps)
     data_module = LLMDataModule(
-        train_dir="/path/to/train_parquets",
-        val_dir="/path/to/val_parquets",
+        train_dir='data/base_data',
+        val_dir='data/base_data',
         tokenizer=tokenizer,
         batch_size=batch_size,
         seq_length=max_seq_len,
