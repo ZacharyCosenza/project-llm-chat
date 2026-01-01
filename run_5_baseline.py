@@ -161,8 +161,8 @@ class LLMModule(pl.LightningModule):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train TinyGPT model')
-    parser.add_argument('--batch_size', type=int, default=1, help='Batch size for training')
-    parser.add_argument('--max_steps', type=int, default=100000, help='Maximum training steps')
+    parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training')
+    parser.add_argument('--max_steps', type=int, default=10000, help='Maximum training steps')
     parser.add_argument('--fast_dev_run', type=int, default=0, help='Run a quick test with N batches')
     args = parser.parse_args()
 
@@ -170,7 +170,7 @@ if __name__ == "__main__":
     logs_dir.mkdir(exist_ok=True)
 
     max_steps = args.max_steps
-    val_check_interval = 1000
+    val_check_interval = 250
 
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
 
