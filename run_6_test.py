@@ -12,6 +12,7 @@ from pytorch_lightning.loggers import WandbLogger
 from core.memory_tracker import MemoryLoggingCallback
 import time
 import os
+import sys
 
 # Debug helper to print with rank and timestamp
 def debug_print(msg, force_all_ranks=False):
@@ -19,11 +20,50 @@ def debug_print(msg, force_all_ranks=False):
     rank = int(os.environ.get('LOCAL_RANK', -1))
     global_rank = int(os.environ.get('RANK', -1))
     world_size = int(os.environ.get('WORLD_SIZE', 1))
-    timestamp = time.strftime("%H:%M:%S")
+    timestamp = time.strftime("%H:%M:%S.%f")[:-3]
 
     if force_all_ranks or rank <= 0:
-        prefix = f"[{timestamp}][R{global_rank}/{world_size}][LR{rank}]"
+        prefix = f"[{timestamp}][R{global_rank}/{world_size}][LR{rank}][PID:{os.getpid()}]"
         print(f"{prefix} {msg}", flush=True)
+        sys.stdout.flush()
+
+class DebugDataModule(pl.LightningDataModule):
+    """Wrapper around LLMDataModule with debug prints"""
+    def __init__(self, *args, **kwargs):
+        debug_print("DebugDataModule.__init__() START")
+        super().__init__()
+        self.inner_module = LLMDataModule(*args, **kwargs)
+        debug_print("DebugDataModule.__init__() END")
+
+    def setup(self, stage=None):
+        debug_print(f"DebugDataModule.setup() START - stage={stage}", force_all_ranks=True)
+        if hasattr(self.inner_module, 'setup'):
+            self.inner_module.setup(stage)
+        debug_print(f"DebugDataModule.setup() END - stage={stage}", force_all_ranks=True)
+
+    def prepare_data(self):
+        debug_print("DebugDataModule.prepare_data() START")
+        if hasattr(self.inner_module, 'prepare_data'):
+            self.inner_module.prepare_data()
+        debug_print("DebugDataModule.prepare_data() END")
+
+    def train_dataloader(self):
+        debug_print("DebugDataModule.train_dataloader() START", force_all_ranks=True)
+        # Copy attributes needed by inner module
+        self.inner_module.trainer = self.trainer
+        loader = self.inner_module.train_dataloader()
+        debug_print(f"DebugDataModule.train_dataloader() - DataLoader created with {self.inner_module.num_workers} workers", force_all_ranks=True)
+        debug_print("DebugDataModule.train_dataloader() END", force_all_ranks=True)
+        return loader
+
+    def val_dataloader(self):
+        debug_print("DebugDataModule.val_dataloader() START", force_all_ranks=True)
+        # Copy attributes needed by inner module
+        self.inner_module.trainer = self.trainer
+        loader = self.inner_module.val_dataloader()
+        debug_print(f"DebugDataModule.val_dataloader() - DataLoader created with {self.inner_module.num_workers} workers", force_all_ranks=True)
+        debug_print("DebugDataModule.val_dataloader() END", force_all_ranks=True)
+        return loader
 
 class LLMModule(pl.LightningModule):
     def __init__(self, model: TinyGPT, tokenizer, base_lr: float = 1e-3, weight_decay: float = 0.01,
@@ -43,6 +83,11 @@ class LLMModule(pl.LightningModule):
         self.save_hyperparameters(ignore=['model', 'tokenizer'])
         debug_print("LLMModule.__init__() END")
 
+    def setup(self, stage):
+        debug_print(f"LLMModule.setup() START - stage={stage}", force_all_ranks=True)
+        debug_print(f"LLMModule.setup() - global_rank={self.global_rank}, local_rank={self.local_rank}", force_all_ranks=True)
+        debug_print(f"LLMModule.setup() END - stage={stage}", force_all_ranks=True)
+
     def forward(self, input_ids):
         return self.model(input_ids)
 
@@ -53,13 +98,11 @@ class LLMModule(pl.LightningModule):
         return loss, logits, labels
 
     def training_step(self, batch, batch_idx):
-        debug_print(f"training_step() START - batch_idx={batch_idx}, global_step={self.global_step}")
+        if batch_idx % 10 == 0:
+            debug_print(f"training_step() - batch_idx={batch_idx}, global_step={self.global_step}")
 
         loss, _, _ = self._compute_loss(batch)
-        debug_print(f"training_step() - loss computed: {loss.item():.4f}")
-
         self.log('train/loss', loss, prog_bar=True, sync_dist=True)
-        debug_print(f"training_step() - loss logged")
 
         optimizer = self.trainer.optimizers[0]
         if optimizer is not None:
@@ -92,24 +135,28 @@ class LLMModule(pl.LightningModule):
             self.log('memory/reserved_gb', memory_reserved, prog_bar=False, sync_dist=False)
             self.log('memory/max_allocated_gb', memory_cached, prog_bar=False, sync_dist=False)
 
-        debug_print(f"training_step() END - batch_idx={batch_idx}")
         return loss
 
     def validation_step(self, batch, batch_idx):
-        debug_print(f"validation_step() START - batch_idx={batch_idx}, rank={self.global_rank}")
+        if batch_idx % 10 == 0:
+            debug_print(f"validation_step() - batch_idx={batch_idx}, rank={self.global_rank}")
 
         loss, logits, labels = self._compute_loss(batch)
         ppl = torch.exp(loss)
         preds = logits.argmax(dim=-1)
         acc = (preds == labels).float().mean()
 
-        debug_print(f"validation_step() - metrics computed, about to log")
         self.log('val/loss', loss, prog_bar=True, sync_dist=True)
         self.log('val/perplexity', ppl, prog_bar=True, sync_dist=True)
         self.log('val/accuracy', acc, prog_bar=True, sync_dist=True)
 
-        debug_print(f"validation_step() END - batch_idx={batch_idx}")
         return loss
+
+    def on_train_start(self):
+        debug_print("on_train_start() called", force_all_ranks=True)
+
+    def on_train_epoch_start(self):
+        debug_print(f"on_train_epoch_start() - epoch={self.current_epoch}", force_all_ranks=True)
 
     def on_validation_epoch_start(self):
         debug_print(f"on_validation_epoch_start() - rank={self.global_rank}", force_all_ranks=True)
@@ -159,7 +206,7 @@ class LLMModule(pl.LightningModule):
                 )
                 debug_print("on_validation_epoch_end() - sentence completions logged")
         else:
-            debug_print(f"on_validation_epoch_end() - rank {self.global_rank} waiting for rank 0")
+            debug_print(f"on_validation_epoch_end() - rank {self.global_rank} waiting")
 
         debug_print(f"on_validation_epoch_end() END - rank={self.global_rank}", force_all_ranks=True)
 
@@ -203,14 +250,6 @@ class LLMModule(pl.LightningModule):
             }
         }
 
-    def on_train_batch_start(self, batch, batch_idx):
-        if batch_idx % 50 == 0:
-            debug_print(f"on_train_batch_start() - batch_idx={batch_idx}")
-
-    def on_train_batch_end(self, outputs, batch, batch_idx):
-        if batch_idx % 50 == 0:
-            debug_print(f"on_train_batch_end() - batch_idx={batch_idx}")
-
 
 if __name__ == "__main__":
     debug_print("=" * 80)
@@ -221,13 +260,15 @@ if __name__ == "__main__":
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training')
     parser.add_argument('--max_steps', type=int, default=10000, help='Maximum training steps')
     parser.add_argument('--fast_dev_run', type=int, default=0, help='Run a quick test with N batches')
+    parser.add_argument('--num_workers', type=int, default=0, help='Number of dataloader workers (0=main process only)')
     args = parser.parse_args()
 
-    debug_print(f"Args parsed: batch_size={args.batch_size}, max_steps={args.max_steps}, fast_dev_run={args.fast_dev_run}")
+    debug_print(f"Args: batch_size={args.batch_size}, max_steps={args.max_steps}, fast_dev_run={args.fast_dev_run}, num_workers={args.num_workers}")
+    debug_print(f"Environment: RANK={os.environ.get('RANK', 'N/A')}, LOCAL_RANK={os.environ.get('LOCAL_RANK', 'N/A')}, WORLD_SIZE={os.environ.get('WORLD_SIZE', 'N/A')}")
 
     logs_dir = Path("logs")
     logs_dir.mkdir(exist_ok=True)
-    debug_print(f"Logs directory created/verified: {logs_dir}")
+    debug_print(f"Logs directory: {logs_dir}")
 
     max_steps = args.max_steps
     val_check_interval = 250
@@ -250,7 +291,7 @@ if __name__ == "__main__":
         n_heads=n_heads,
         max_seq_len=max_seq_len
     )
-    debug_print(f"Model created: dim={dim}, n_layers={n_layers}, n_heads={n_heads}")
+    debug_print(f"Model created: dim={dim}, n_layers={n_layers}, n_heads={n_heads}, params={sum(p.numel() for p in model.parameters())/1e6:.2f}M")
 
     base_lr = 1e-3
     weight_decay = 0.01
@@ -290,14 +331,14 @@ if __name__ == "__main__":
     )
     debug_print("LLMModule created")
 
-    debug_print("Creating DataModule...")
-    data_module = LLMDataModule(
+    debug_print(f"Creating DataModule with num_workers={args.num_workers}...")
+    data_module = DebugDataModule(
         train_dir='data/base_data',
         val_dir='data/base_data',
         tokenizer=tokenizer,
         batch_size=batch_size,
         seq_length=max_seq_len,
-        num_workers=4,
+        num_workers=args.num_workers,
         val_sequences=10
     )
     debug_print("DataModule created")
@@ -323,7 +364,7 @@ if __name__ == "__main__":
     debug_print("Creating WandbLogger...")
     wandb_logger = WandbLogger(
         project="llm-training",
-        name=f"test-debug",
+        name=f"test-debug-nw{args.num_workers}",
         save_dir=str(logs_dir),
         log_model=True,
         config={
@@ -347,6 +388,7 @@ if __name__ == "__main__":
             "accelerator": accelerator,
             "devices": devices,
             "strategy": strategy,
+            "num_workers": args.num_workers,
         }
     )
     debug_print("WandbLogger created")
@@ -377,10 +419,19 @@ if __name__ == "__main__":
     debug_print("=" * 80)
     debug_print("CALLING trainer.fit()...")
     debug_print("=" * 80)
+    sys.stdout.flush()
 
-    trainer.fit(llm_module, data_module)
+    try:
+        trainer.fit(llm_module, data_module)
+        debug_print("=" * 80)
+        debug_print("trainer.fit() COMPLETED SUCCESSFULLY")
+        debug_print("=" * 80)
+    except Exception as e:
+        debug_print("=" * 80)
+        debug_print(f"trainer.fit() FAILED WITH EXCEPTION: {type(e).__name__}: {e}")
+        debug_print("=" * 80)
+        import traceback
+        traceback.print_exc()
+        raise
 
-    debug_print("=" * 80)
-    debug_print("trainer.fit() COMPLETED")
     debug_print("SCRIPT END")
-    debug_print("=" * 80)
