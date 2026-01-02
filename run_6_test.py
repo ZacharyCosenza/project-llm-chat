@@ -14,6 +14,9 @@ import time
 import os
 import sys
 
+# Global script start time for elapsed time tracking
+SCRIPT_START_TIME = time.time()
+
 # Debug helper to print with rank and timestamp
 def debug_print(msg, force_all_ranks=False):
     """Print debug message with rank, timestamp, and process info"""
@@ -21,19 +24,52 @@ def debug_print(msg, force_all_ranks=False):
     global_rank = int(os.environ.get('RANK', -1))
     world_size = int(os.environ.get('WORLD_SIZE', 1))
     timestamp = time.strftime("%H:%M:%S.%f")[:-3]
+    elapsed = time.time() - SCRIPT_START_TIME
 
     if force_all_ranks or rank <= 0:
-        prefix = f"[{timestamp}][R{global_rank}/{world_size}][LR{rank}][PID:{os.getpid()}]"
+        prefix = f"[{timestamp}][+{elapsed:.3f}s][R{global_rank}/{world_size}][LR{rank}][PID:{os.getpid()}]"
         print(f"{prefix} {msg}", flush=True)
         sys.stdout.flush()
+
+def print_env_vars():
+    """Print all relevant environment variables for debugging"""
+    debug_print("=" * 80, force_all_ranks=True)
+    debug_print("ENVIRONMENT VARIABLES:", force_all_ranks=True)
+    env_vars = [
+        'RANK', 'LOCAL_RANK', 'WORLD_SIZE',
+        'MASTER_ADDR', 'MASTER_PORT',
+        'CUDA_VISIBLE_DEVICES',
+        'NCCL_DEBUG', 'NCCL_SOCKET_IFNAME',
+        'WANDB_MODE', 'WANDB_API_KEY', 'WANDB_DIR'
+    ]
+    for var in env_vars:
+        value = os.environ.get(var, 'NOT SET')
+        debug_print(f"  {var} = {value}", force_all_ranks=True)
+    debug_print("=" * 80, force_all_ranks=True)
+
+def print_cuda_info():
+    """Print CUDA and distributed status"""
+    debug_print("=" * 80, force_all_ranks=True)
+    debug_print("CUDA/DISTRIBUTED STATUS:", force_all_ranks=True)
+    debug_print(f"  torch.cuda.is_available() = {torch.cuda.is_available()}", force_all_ranks=True)
+    if torch.cuda.is_available():
+        debug_print(f"  torch.cuda.device_count() = {torch.cuda.device_count()}", force_all_ranks=True)
+        debug_print(f"  torch.cuda.current_device() = {torch.cuda.current_device()}", force_all_ranks=True)
+    debug_print(f"  torch.distributed.is_available() = {torch.distributed.is_available()}", force_all_ranks=True)
+    debug_print(f"  torch.distributed.is_initialized() = {torch.distributed.is_initialized()}", force_all_ranks=True)
+    if torch.distributed.is_initialized():
+        debug_print(f"  torch.distributed.get_backend() = {torch.distributed.get_backend()}", force_all_ranks=True)
+        debug_print(f"  torch.distributed.get_rank() = {torch.distributed.get_rank()}", force_all_ranks=True)
+        debug_print(f"  torch.distributed.get_world_size() = {torch.distributed.get_world_size()}", force_all_ranks=True)
+    debug_print("=" * 80, force_all_ranks=True)
 
 class DebugDataModule(pl.LightningDataModule):
     """Wrapper around LLMDataModule with debug prints"""
     def __init__(self, *args, **kwargs):
-        debug_print("DebugDataModule.__init__() START")
+        debug_print("DebugDataModule.__init__() START", force_all_ranks=True)
         super().__init__()
         self.inner_module = LLMDataModule(*args, **kwargs)
-        debug_print("DebugDataModule.__init__() END")
+        debug_print("DebugDataModule.__init__() END", force_all_ranks=True)
 
     def setup(self, stage=None):
         debug_print(f"DebugDataModule.setup() START - stage={stage}", force_all_ranks=True)
@@ -252,9 +288,16 @@ class LLMModule(pl.LightningModule):
 
 
 if __name__ == "__main__":
-    debug_print("=" * 80)
-    debug_print("SCRIPT START")
-    debug_print("=" * 80)
+    debug_print("=" * 80, force_all_ranks=True)
+    debug_print("SCRIPT START", force_all_ranks=True)
+    debug_print("=" * 80, force_all_ranks=True)
+    debug_print("CHECKPOINT 1: Script started", force_all_ranks=True)
+
+    # Print all environment variables
+    print_env_vars()
+
+    # Print CUDA/distributed info
+    print_cuda_info()
 
     parser = argparse.ArgumentParser(description='Train TinyGPT model')
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training')
@@ -263,19 +306,24 @@ if __name__ == "__main__":
     parser.add_argument('--num_workers', type=int, default=0, help='Number of dataloader workers (0=main process only)')
     args = parser.parse_args()
 
-    debug_print(f"Args: batch_size={args.batch_size}, max_steps={args.max_steps}, fast_dev_run={args.fast_dev_run}, num_workers={args.num_workers}")
-    debug_print(f"Environment: RANK={os.environ.get('RANK', 'N/A')}, LOCAL_RANK={os.environ.get('LOCAL_RANK', 'N/A')}, WORLD_SIZE={os.environ.get('WORLD_SIZE', 'N/A')}")
+    debug_print(f"Args: batch_size={args.batch_size}, max_steps={args.max_steps}, fast_dev_run={args.fast_dev_run}, num_workers={args.num_workers}", force_all_ranks=True)
+    debug_print("CHECKPOINT 2: Args parsed", force_all_ranks=True)
 
+    debug_print("ENTERING: logs directory creation", force_all_ranks=True)
     logs_dir = Path("logs")
     logs_dir.mkdir(exist_ok=True)
-    debug_print(f"Logs directory: {logs_dir}")
+    debug_print(f"COMPLETED: logs directory creation -> {logs_dir}", force_all_ranks=True)
+    debug_print("CHECKPOINT 3: Logs directory ready", force_all_ranks=True)
 
     max_steps = args.max_steps
     val_check_interval = 250
 
-    debug_print("Loading tokenizer...")
+    debug_print("=" * 80, force_all_ranks=True)
+    debug_print("ENTERING: Tokenizer loading", force_all_ranks=True)
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
-    debug_print(f"Tokenizer loaded: vocab_size={tokenizer.vocab_size}")
+    debug_print(f"COMPLETED: Tokenizer loaded -> vocab_size={tokenizer.vocab_size}", force_all_ranks=True)
+    debug_print("CHECKPOINT 4: Tokenizer loaded", force_all_ranks=True)
+    debug_print("=" * 80, force_all_ranks=True)
 
     n_layers = 20
     max_seq_len = 2048
@@ -283,7 +331,8 @@ if __name__ == "__main__":
     dim = n_layers * 64
     n_heads = max(1, (dim + 127) // 128)
 
-    debug_print("Creating model...")
+    debug_print("=" * 80, force_all_ranks=True)
+    debug_print("ENTERING: Model creation", force_all_ranks=True)
     model = TinyGPT(
         vocab_size=tokenizer.vocab_size,
         dim=dim,
@@ -291,7 +340,9 @@ if __name__ == "__main__":
         n_heads=n_heads,
         max_seq_len=max_seq_len
     )
-    debug_print(f"Model created: dim={dim}, n_layers={n_layers}, n_heads={n_heads}, params={sum(p.numel() for p in model.parameters())/1e6:.2f}M")
+    debug_print(f"COMPLETED: Model created -> dim={dim}, n_layers={n_layers}, n_heads={n_heads}, params={sum(p.numel() for p in model.parameters())/1e6:.2f}M", force_all_ranks=True)
+    debug_print("CHECKPOINT 5: Model created", force_all_ranks=True)
+    debug_print("=" * 80, force_all_ranks=True)
 
     base_lr = 1e-3
     weight_decay = 0.01
@@ -317,7 +368,8 @@ if __name__ == "__main__":
     print0(f"Constant steps: {constant_steps}")
     print0(f"Warmdown steps: {warmdown_steps}")
 
-    debug_print("Creating LLMModule...")
+    debug_print("=" * 80, force_all_ranks=True)
+    debug_print("ENTERING: LLMModule creation", force_all_ranks=True)
     llm_module = LLMModule(
         model,
         tokenizer,
@@ -329,9 +381,12 @@ if __name__ == "__main__":
         max_steps=max_steps,
         dim=dim
     )
-    debug_print("LLMModule created")
+    debug_print("COMPLETED: LLMModule created", force_all_ranks=True)
+    debug_print("CHECKPOINT 6: LLMModule ready", force_all_ranks=True)
+    debug_print("=" * 80, force_all_ranks=True)
 
-    debug_print(f"Creating DataModule with num_workers={args.num_workers}...")
+    debug_print("=" * 80, force_all_ranks=True)
+    debug_print(f"ENTERING: DataModule creation (num_workers={args.num_workers})", force_all_ranks=True)
     data_module = DebugDataModule(
         train_dir='data/base_data',
         val_dir='data/base_data',
@@ -341,15 +396,19 @@ if __name__ == "__main__":
         num_workers=args.num_workers,
         val_sequences=10
     )
-    debug_print("DataModule created")
+    debug_print("COMPLETED: DataModule created", force_all_ranks=True)
+    debug_print("CHECKPOINT 7: DataModule ready", force_all_ranks=True)
+    debug_print("=" * 80, force_all_ranks=True)
 
+    debug_print("=" * 80, force_all_ranks=True)
+    debug_print("ENTERING: Accelerator detection", force_all_ranks=True)
     if torch.cuda.is_available():
         num_gpus = torch.cuda.device_count()
         accelerator = 'gpu'
         devices = num_gpus
         strategy = 'auto'
         print0(f"Detected {num_gpus} GPU(s): {[torch.cuda.get_device_name(i) for i in range(num_gpus)]}")
-        debug_print(f"GPU configuration: {num_gpus} devices, strategy={strategy}")
+        debug_print(f"GPU configuration: {num_gpus} devices, strategy={strategy}", force_all_ranks=True)
     elif torch.backends.mps.is_available():
         accelerator = 'mps'
         devices = 1
@@ -360,8 +419,16 @@ if __name__ == "__main__":
         devices = 1
         strategy = 'auto'
         print0("No GPU detected, using CPU")
+    debug_print("COMPLETED: Accelerator detection", force_all_ranks=True)
+    debug_print("CHECKPOINT 8: Accelerator configured", force_all_ranks=True)
+    debug_print("=" * 80, force_all_ranks=True)
 
-    debug_print("Creating WandbLogger...")
+    debug_print("=" * 80, force_all_ranks=True)
+    debug_print("⚠️  CRITICAL SECTION: WandbLogger initialization", force_all_ranks=True)
+    debug_print("ENTERING: WandbLogger.__init__", force_all_ranks=True)
+    debug_print("About to call WandbLogger constructor...", force_all_ranks=True)
+    sys.stdout.flush()
+
     wandb_logger = WandbLogger(
         project="llm-training",
         name=f"test-debug-nw{args.num_workers}",
@@ -391,13 +458,28 @@ if __name__ == "__main__":
             "num_workers": args.num_workers,
         }
     )
-    debug_print("WandbLogger created")
 
-    debug_print("Creating MemoryLoggingCallback...")
+    debug_print("WandbLogger.__init__ RETURNED successfully!", force_all_ranks=True)
+    debug_print("COMPLETED: WandbLogger initialization", force_all_ranks=True)
+    debug_print("CHECKPOINT 9: WandbLogger ready", force_all_ranks=True)
+    debug_print("=" * 80, force_all_ranks=True)
+
+    debug_print("=" * 80, force_all_ranks=True)
+    debug_print("ENTERING: MemoryLoggingCallback creation", force_all_ranks=True)
     memory_callback = MemoryLoggingCallback(log_every_n_steps=10)
-    debug_print("MemoryLoggingCallback created")
+    debug_print("COMPLETED: MemoryLoggingCallback created", force_all_ranks=True)
+    debug_print("CHECKPOINT 10: MemoryLoggingCallback ready", force_all_ranks=True)
+    debug_print("=" * 80, force_all_ranks=True)
 
-    debug_print("Creating Trainer...")
+    # Print CUDA/distributed status again before Trainer
+    print_cuda_info()
+
+    debug_print("=" * 80, force_all_ranks=True)
+    debug_print("⚠️  CRITICAL SECTION: PyTorch Lightning Trainer initialization", force_all_ranks=True)
+    debug_print("ENTERING: pl.Trainer.__init__", force_all_ranks=True)
+    debug_print(f"About to call pl.Trainer with strategy={strategy}, devices={devices}...", force_all_ranks=True)
+    sys.stdout.flush()
+
     trainer = pl.Trainer(
         accelerator=accelerator,
         devices=devices,
@@ -414,24 +496,35 @@ if __name__ == "__main__":
         callbacks=[memory_callback],
         fast_dev_run=args.fast_dev_run if args.fast_dev_run > 0 else False,
     )
-    debug_print("Trainer created")
 
-    debug_print("=" * 80)
-    debug_print("CALLING trainer.fit()...")
-    debug_print("=" * 80)
+    debug_print("pl.Trainer.__init__ RETURNED successfully!", force_all_ranks=True)
+    debug_print("COMPLETED: Trainer initialization", force_all_ranks=True)
+    debug_print("CHECKPOINT 11: Trainer ready", force_all_ranks=True)
+    debug_print("=" * 80, force_all_ranks=True)
+
+    # Print distributed status after Trainer init
+    print_cuda_info()
+
+    debug_print("=" * 80, force_all_ranks=True)
+    debug_print("⚠️  CRITICAL SECTION: trainer.fit() call", force_all_ranks=True)
+    debug_print("ENTERING: trainer.fit()", force_all_ranks=True)
+    debug_print("About to call trainer.fit(llm_module, data_module)...", force_all_ranks=True)
     sys.stdout.flush()
 
     try:
         trainer.fit(llm_module, data_module)
-        debug_print("=" * 80)
-        debug_print("trainer.fit() COMPLETED SUCCESSFULLY")
-        debug_print("=" * 80)
+        debug_print("=" * 80, force_all_ranks=True)
+        debug_print("trainer.fit() COMPLETED SUCCESSFULLY", force_all_ranks=True)
+        debug_print("CHECKPOINT 12: Training finished", force_all_ranks=True)
+        debug_print("=" * 80, force_all_ranks=True)
     except Exception as e:
-        debug_print("=" * 80)
-        debug_print(f"trainer.fit() FAILED WITH EXCEPTION: {type(e).__name__}: {e}")
-        debug_print("=" * 80)
+        debug_print("=" * 80, force_all_ranks=True)
+        debug_print(f"trainer.fit() FAILED WITH EXCEPTION: {type(e).__name__}: {e}", force_all_ranks=True)
+        debug_print("=" * 80, force_all_ranks=True)
         import traceback
         traceback.print_exc()
         raise
 
-    debug_print("SCRIPT END")
+    debug_print("=" * 80, force_all_ranks=True)
+    debug_print("SCRIPT END", force_all_ranks=True)
+    debug_print("=" * 80, force_all_ranks=True)
