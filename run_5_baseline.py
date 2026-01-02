@@ -340,7 +340,7 @@ if __name__ == "__main__":
         batch_size=batch_size,
         seq_length=max_seq_len,
         num_workers=4,
-        val_sequences=10
+        val_sequences=1000
     )
 
     if torch.cuda.is_available():
