@@ -11,6 +11,116 @@ from transformers import AutoTokenizer
 from pytorch_lightning.loggers import WandbLogger
 from core.memory_tracker import MemoryLoggingCallback
 
+from collections import deque
+import torch
+from core.dataset import list_parquet_files
+from core.utils import get_dist_info
+import random
+from itertools import cycle
+from collections import deque
+from torch.utils.data import IterableDataset, DataLoader
+import pyarrow.parquet as pq
+from pathlib import Path
+import pytorch_lightning as pl
+from core.utils import print0
+
+class StreamingParquetDataset(IterableDataset):
+    def __init__(self, parquet_dir: str, tokenizer, seq_length: int = 2048,
+                 rank: int = 0, world_size: int = 1, shuffle: bool = False,
+                 max_sequences: int = None):
+        self.files = sorted(Path(parquet_dir).glob("*.parquet"))
+        self.tokenizer = tokenizer
+        self.seq_length = seq_length
+        self.rank = rank
+        self.world_size = world_size
+        self.shuffle = shuffle
+        self.max_sequences = max_sequences
+    
+    def __iter__(self):
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is None:
+            num_workers, worker_id = 1, 0
+        else:
+            num_workers, worker_id = worker_info.num_workers, worker_info.id
+        
+        total_shards = self.world_size * num_workers
+        shard_id = self.rank * num_workers + worker_id
+        print0(f"Rank {self.rank}, shard_id {shard_id}, total_shards {total_shards}, num_files {len(self.files)}")
+        
+        files = self.files.copy()
+        if self.shuffle:
+            random.shuffle(files)
+        
+        buffer = deque()
+        sequences_yielded = 0
+        
+        for file_idx in cycle(range(len(files))) if self.max_sequences else range(len(files)):
+            if file_idx % total_shards != shard_id:
+                continue
+            filepath = files[file_idx]
+            
+            pf = pq.ParquetFile(filepath)
+            for rg_idx in range(pf.metadata.num_row_groups):
+                table = pf.read_row_group(rg_idx, columns=['text'])
+                for text in table['text'].to_pylist():
+                    tokens = self.tokenizer.encode(text, add_special_tokens=False)
+                    buffer.extend(tokens)
+                    buffer.append(self.tokenizer.eos_token_id)
+                    
+                    while len(buffer) >= self.seq_length + 1:
+                        chunk = [buffer.popleft() for _ in range(self.seq_length + 1)]
+                        yield {
+                            'input_ids': torch.tensor(chunk[:-1], dtype=torch.long),
+                            'labels': torch.tensor(chunk[1:], dtype=torch.long)
+                        }
+                        sequences_yielded += 1
+                        if self.max_sequences and sequences_yielded >= self.max_sequences:
+                            return
+
+class LLMDataModule(pl.LightningDataModule):
+    def __init__(self, train_dir: str, val_dir: str, tokenizer, batch_size: int = 8,
+                 seq_length: int = 2048, num_workers: int = 4, val_sequences: int = 1000):
+        super().__init__()
+        self.train_dir = train_dir
+        self.val_dir = val_dir
+        self.tokenizer = tokenizer
+        self.batch_size = batch_size
+        self.seq_length = seq_length
+        self.num_workers = num_workers
+        self.val_sequences = val_sequences
+    
+    def _collate(self, batch):
+        return {
+            'input_ids': torch.stack([x['input_ids'] for x in batch]),
+            'labels': torch.stack([x['labels'] for x in batch])
+        }
+    
+    def train_dataloader(self):
+        dataset = StreamingParquetDataset(
+            self.train_dir, self.tokenizer, self.seq_length,
+            rank=self.trainer.global_rank,
+            world_size=self.trainer.world_size,
+            shuffle=True
+        )
+        return DataLoader(
+            dataset, batch_size=self.batch_size, collate_fn=self._collate,
+            num_workers=self.num_workers, pin_memory=True, prefetch_factor=2
+        )
+    
+    def val_dataloader(self):
+        per_gpu_sequences = self.val_sequences // self.trainer.world_size
+        dataset = StreamingParquetDataset(
+            self.val_dir, self.tokenizer, self.seq_length,
+            rank=self.trainer.global_rank,
+            world_size=self.trainer.world_size,
+            shuffle=False,
+            max_sequences=per_gpu_sequences
+        )
+        return DataLoader(
+            dataset, batch_size=self.batch_size, collate_fn=self._collate,
+            num_workers=self.num_workers, pin_memory=True
+        )
+
 class LLMModule(pl.LightningModule):
     def __init__(self, model: TinyGPT, tokenizer, base_lr: float = 1e-3, weight_decay: float = 0.01,
                  warmup_ratio: float = 0.0, warmdown_ratio: float = 0.2, final_lr_frac: float = 0.0,
