@@ -30,7 +30,7 @@ K uses 3 datasets for his example and 4 steps of training (let's ignore RL for n
 
 1. Pretrain on FineWeb-Edu: large, 14.5B tokens used in training, derived from common crawl, generally high quality websites and educational resources. Use causal language modeling loss function where logit from model predicts likleihood of next token given vocabulary. This is good for general understanding of grammar, facts, reasoning. 
 2. Midtrain on FineWeb-Edu + SmolTalk Mix: medium, 5B tokens used in training at 70:30 split of FineWeb-Edu and SmolTalk (which uses Q:A conversations in coding, math, creative writing, advice, chitchat). Uses same loss function as pretraining. Mixing is useful to stop model from overfitting on new data (might lose world knowledge in favor of conversational knowledge).
-3. SFT on SmolTalk: medium, 2-3B tokens of 100% SmolTalk, uses masked lanaguage modeling loss function to only generate the assistant response (the answer). 
+3. SFT on SmolTalk: medium, 2-3B tokens of 100% SmolTalk, uses masked language modeling loss function to only generate the assistant response (the answer). 
 
 Remember that attention masking is already used in training GPT-style models, so part (3) masking is more of a fine tune on particular tasks to only give reward to model for particular behavior.
 
