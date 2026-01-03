@@ -33,7 +33,6 @@ class StreamingParquetDataset(IterableDataset):
     
     def __iter__(self):
         worker_info = torch.utils.data.get_worker_info()
-        print(worker_info)
         if worker_info is None:
             num_workers, worker_id = 1, 0
         else:
@@ -341,9 +340,11 @@ if __name__ == "__main__":
 
     if torch.cuda.is_available():
         num_gpus = torch.cuda.device_count()
+        from lightning.pytorch.strategies import DDPStrategy
         accelerator = 'gpu'
         devices = num_gpus
-        strategy = 'auto'
+        # strategy = 'auto'
+        strategy = DDPStrategy(process_group_backend="gloo")
         print0(f"Detected {num_gpus} GPU(s): {[torch.cuda.get_device_name(i) for i in range(num_gpus)]}")
     elif torch.backends.mps.is_available():
         accelerator = 'mps'
