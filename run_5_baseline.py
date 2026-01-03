@@ -340,11 +340,9 @@ if __name__ == "__main__":
 
     if torch.cuda.is_available():
         num_gpus = torch.cuda.device_count()
-        from lightning.pytorch.strategies import DDPStrategy
         accelerator = 'gpu'
         devices = num_gpus
-        # strategy = 'auto'
-        strategy = DDPStrategy(process_group_backend="gloo")
+        strategy = 'auto'
         print0(f"Detected {num_gpus} GPU(s): {[torch.cuda.get_device_name(i) for i in range(num_gpus)]}")
     elif torch.backends.mps.is_available():
         accelerator = 'mps'
