@@ -47,10 +47,10 @@ class StreamingParquetDataset(IterableDataset):
         buffer = deque()
         sequences_yielded = 0
 
-        for _ in cycle(range(1)) if self.max_sequences else range(1):
+        # Keep sampling until we've yielded enough sequences
+        while not self.max_sequences or sequences_yielded < self.max_sequences:
             # Select a random parquet file
             filepath = random.choice(files)
-            print0(f"Selected random file: {filepath}")
 
             pf = pq.ParquetFile(filepath)
             num_row_groups = pf.metadata.num_row_groups
@@ -64,7 +64,6 @@ class StreamingParquetDataset(IterableDataset):
             if rows:
                 random_row_idx = random.randint(0, len(rows) - 1)
                 text = rows[random_row_idx]
-                print0(f"Selected random row {random_row_idx} from row group {rg_idx}")
 
                 tokens = self.tokenizer.encode(text, add_special_tokens=False)
                 buffer.extend(tokens)
