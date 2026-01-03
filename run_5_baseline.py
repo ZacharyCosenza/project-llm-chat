@@ -33,6 +33,7 @@ class StreamingParquetDataset(IterableDataset):
     
     def __iter__(self):
         worker_info = torch.utils.data.get_worker_info()
+        print(worker_info)
         if worker_info is None:
             num_workers, worker_id = 1, 0
         else:
