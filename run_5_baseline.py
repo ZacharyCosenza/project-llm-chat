@@ -5,16 +5,11 @@ import pytorch_lightning as pl
 from pathlib import Path
 from core.utils import print0
 from core.models import TinyGPT
-from core.dataloader import LLMDataModule
 import argparse
 from transformers import AutoTokenizer
 from pytorch_lightning.loggers import WandbLogger
 from core.memory_tracker import MemoryLoggingCallback
-
 from collections import deque
-import torch
-from core.dataset import list_parquet_files
-from core.utils import get_dist_info
 import random
 from itertools import cycle
 from collections import deque
@@ -400,7 +395,8 @@ if __name__ == "__main__":
         gradient_clip_val=1.0,
         accumulate_grad_batches=4,
         log_every_n_steps=10,
-        val_check_interval=val_check_interval,
+        num_sanity_val_steps=0,
+        limit_val_batches=0,
         logger=wandb_logger,
         enable_progress_bar=True,
         enable_model_summary=True,
