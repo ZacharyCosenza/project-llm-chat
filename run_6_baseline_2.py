@@ -357,8 +357,8 @@ def main():
     parser = argparse.ArgumentParser(description="Train TinyGPT on parquet data")
     
     # Data args
-    parser.add_argument("--train_dir", type=str, default="data/base_data", help="Directory with training parquet files")
-    parser.add_argument("--val_dir", type=str, default="data/base_data", help="Directory with validation parquet files")
+    train_dir = 'data/base_data'
+    val_dir = 'data/base_data'
     
     # Model args
     n_layers = 20
@@ -394,9 +394,9 @@ def main():
     
     # Create data module
     data_module = ParquetDataModule(
-        train_dir=args.train_dir,
-        val_dir=args.val_dir,
-        seq_len=args.seq_len,
+        train_dir=train_dir,
+        val_dir=val_dir,
+        seq_len=seq_len,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
     )
