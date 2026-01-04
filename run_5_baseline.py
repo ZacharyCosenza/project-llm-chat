@@ -189,42 +189,42 @@ class LLMModule(pl.LightningModule):
         self.log('val/accuracy', acc, prog_bar=True, sync_dist=True)
         return loss
     
-    # def on_validation_epoch_end(self):
-    #     if self.global_rank == 0:
-    #         from core.validation import run_world_knowledge_validation, run_sentence_completion
+    def on_validation_epoch_end(self):
+        if self.global_rank == 0:
+            from core.validation import run_world_knowledge_validation, run_sentence_completion
 
-    #         world_knowledge_results = run_world_knowledge_validation(
-    #             self.model,
-    #             self.tokenizer,
-    #             device=self.device,
-    #             max_new_tokens=20,
-    #             temperature=0.3,
-    #             top_k=40
-    #         )
+            world_knowledge_results = run_world_knowledge_validation(
+                self.model,
+                self.tokenizer,
+                device=self.device,
+                max_new_tokens=20,
+                temperature=0.3,
+                top_k=40
+            )
 
-    #         if self.logger and 'metrics' in world_knowledge_results:
-    #             metrics_to_log = {f"val/{k}": v for k, v in world_knowledge_results['metrics'].items()}
-    #             self.log_dict(metrics_to_log, sync_dist=False)
+            if self.logger and 'metrics' in world_knowledge_results:
+                metrics_to_log = {f"val/{k}": v for k, v in world_knowledge_results['metrics'].items()}
+                self.log_dict(metrics_to_log, sync_dist=False)
 
-    #         sentence_completions = run_sentence_completion(
-    #             self.model,
-    #             self.tokenizer,
-    #             device=self.device,
-    #             max_new_tokens=50,
-    #             temperature=0.8,
-    #             top_k=40
-    #         )
+            sentence_completions = run_sentence_completion(
+                self.model,
+                self.tokenizer,
+                device=self.device,
+                max_new_tokens=50,
+                temperature=0.8,
+                top_k=40
+            )
 
-    #         if self.logger and sentence_completions:
-    #             sentence_completion_data = [
-    #                 [self.global_step, item['prompt'], item['completion']]
-    #                 for item in sentence_completions
-    #             ]
-    #             self.logger.log_text(
-    #                 key="sentence_completions",
-    #                 columns=["step", "prompt", "completion"],
-    #                 data=sentence_completion_data
-    #             )
+            if self.logger and sentence_completions:
+                sentence_completion_data = [
+                    [self.global_step, item['prompt'], item['completion']]
+                    for item in sentence_completions
+                ]
+                self.logger.log_text(
+                    key="sentence_completions",
+                    columns=["step", "prompt", "completion"],
+                    data=sentence_completion_data
+                )
     
     def configure_optimizers(self):
         embedding_params = list(self.model.tok_emb.parameters()) + list(self.model.pos_emb.parameters())
