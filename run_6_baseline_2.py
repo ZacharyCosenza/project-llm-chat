@@ -441,7 +441,7 @@ def main():
             save_dir=args.output_dir,
             log_model=False,  # Don't auto-upload checkpoints
             config={
-                "vocab_size": args.vocab_size,
+                "vocab_size": vocab_size,
                 "dim": args.dim,
                 "n_layers": args.n_layers,
                 "n_heads": args.n_heads,
