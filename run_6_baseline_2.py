@@ -435,6 +435,9 @@ def main():
         ),
         LearningRateMonitor(logging_interval="step"),
     ]
+
+    # Determine number of GPUs
+    num_gpus = args.gpus if args.gpus > 0 else torch.cuda.device_count()
     
     # Wandb logger
     logger = None
@@ -461,9 +464,7 @@ def main():
                 "num_gpus": num_gpus,
             }
         )
-    
-    # Determine number of GPUs
-    num_gpus = args.gpus if args.gpus > 0 else torch.cuda.device_count()
+
     
     # Trainer
     trainer = pl.Trainer(
