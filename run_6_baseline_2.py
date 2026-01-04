@@ -442,10 +442,10 @@ def main():
             log_model=False,  # Don't auto-upload checkpoints
             config={
                 "vocab_size": vocab_size,
-                "dim": args.dim,
-                "n_layers": args.n_layers,
-                "n_heads": args.n_heads,
-                "seq_len": args.seq_len,
+                "dim": dim,
+                "n_layers": n_layers,
+                "n_heads": n_heads,
+                "seq_len": seq_len,
                 "batch_size": args.batch_size,
                 "lr": args.lr,
                 "weight_decay": args.weight_decay,
