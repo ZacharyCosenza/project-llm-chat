@@ -300,25 +300,21 @@ class ParquetDataModule(pl.LightningDataModule):
         self,
         train_dir: str,
         val_dir: str = None,
-        tokenizer_name: str = "gpt2",
         seq_len: int = 128,
         batch_size: int = 64,
         num_workers: int = 4,
-        text_column: str = "text",
     ):
         super().__init__()
         self.train_dir = train_dir
         self.val_dir = val_dir or train_dir  # Use train for val if not specified
-        self.tokenizer_name = tokenizer_name
         self.seq_len = seq_len
         self.batch_size = batch_size
         self.num_workers = num_workers
-        self.text_column = text_column
-        
+
         self.tokenizer = None
-        
+
     def setup(self, stage=None):
-        self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name)
+        self.tokenizer = AutoTokenizer.from_pretrained("gpt2")
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
             
@@ -327,7 +323,7 @@ class ParquetDataModule(pl.LightningDataModule):
             data_dir=self.train_dir,
             tokenizer=self.tokenizer,
             seq_len=self.seq_len,
-            text_column=self.text_column,
+            text_column="text",
             shuffle_files=True,
         )
         
@@ -344,7 +340,7 @@ class ParquetDataModule(pl.LightningDataModule):
             data_dir=self.val_dir,
             tokenizer=self.tokenizer,
             seq_len=self.seq_len,
-            text_column=self.text_column,
+            text_column="text",
             shuffle_files=False,
         )
         
@@ -361,17 +357,15 @@ def main():
     parser = argparse.ArgumentParser(description="Train TinyGPT on parquet data")
     
     # Data args
-    parser.add_argument("--train_dir", type=str, required=True, help="Directory with training parquet files")
-    parser.add_argument("--val_dir", type=str, default=None, help="Directory with validation parquet files")
-    parser.add_argument("--text_column", type=str, default="text", help="Column name containing text")
-    parser.add_argument("--tokenizer", type=str, default="gpt2", help="HuggingFace tokenizer name")
+    parser.add_argument("--train_dir", type=str, default="data/base_data", help="Directory with training parquet files")
+    parser.add_argument("--val_dir", type=str, default="data/base_data", help="Directory with validation parquet files")
     
     # Model args
-    parser.add_argument("--vocab_size", type=int, default=50257, help="Vocabulary size")
-    parser.add_argument("--dim", type=int, default=64, help="Model dimension")
-    parser.add_argument("--n_layers", type=int, default=2, help="Number of transformer layers")
-    parser.add_argument("--n_heads", type=int, default=2, help="Number of attention heads")
-    parser.add_argument("--seq_len", type=int, default=128, help="Sequence length")
+    n_layers = 20
+    seq_len = 2048
+    dim = n_layers * 64
+    n_heads = max(1, (dim + 127) // 128)
+    vocab_size = 50257
     
     # Training args
     parser.add_argument("--batch_size", type=int, default=64, help="Batch size per GPU")
@@ -380,7 +374,7 @@ def main():
     parser.add_argument("--warmup_steps", type=int, default=100, help="Warmup steps")
     parser.add_argument("--max_steps", type=int, default=10000, help="Max training steps")
     parser.add_argument("--val_check_interval", type=int, default=500, help="Validation every N steps")
-    parser.add_argument("--num_workers", type=int, default=4, help="Dataloader workers per GPU")
+    parser.add_argument("--num_workers", type=int, default=0, help="Dataloader workers per GPU")
     parser.add_argument("--accumulate_grad_batches", type=int, default=1, help="Gradient accumulation steps")
     
     # Hardware args
@@ -402,20 +396,18 @@ def main():
     data_module = ParquetDataModule(
         train_dir=args.train_dir,
         val_dir=args.val_dir,
-        tokenizer_name=args.tokenizer,
         seq_len=args.seq_len,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
-        text_column=args.text_column,
     )
     
     # Create model
     model = TinyGPTLightning(
-        vocab_size=args.vocab_size,
-        dim=args.dim,
-        n_layers=args.n_layers,
-        n_heads=args.n_heads,
-        max_seq_len=args.seq_len,
+        vocab_size=vocab_size,
+        dim=dim,
+        n_layers=n_layers,
+        n_heads=n_heads,
+        max_seq_len=seq_len,
         learning_rate=args.lr,
         weight_decay=args.weight_decay,
         warmup_steps=args.warmup_steps,
