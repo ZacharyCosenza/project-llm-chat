@@ -1,10 +1,7 @@
-apt update -y
-apt install vim -y
-apt install tmux -y
+
 
 # Create conda environment with Python 3.11
-conda create -n chat python=3.11 -y
-conda activate chat
+conda activate cloudspace
 
 # Install core packages via conda
 conda install -y numpy pandas matplotlib scikit-learn pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia
