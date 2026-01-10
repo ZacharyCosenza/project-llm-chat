@@ -81,10 +81,11 @@ def test_gpu():
 
     # Create dataset and dataloader
     print("\nLoading dataset...")
+    seq_length = 128  # Match model's max_seq_len
     dataset = SimpleParquetDataset(
         parquet_dir='data/base_data',
         tokenizer=tokenizer,
-        seq_length=512,
+        seq_length=seq_length,
         max_sequences=10
     )
 
