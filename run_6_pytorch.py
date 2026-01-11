@@ -337,7 +337,7 @@ if __name__ == "__main__":
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
 
     n_layers = 20
-    max_seq_len = 2048 // 2
+    max_seq_len = 2048
     batch_size = args.batch_size
     dim = n_layers * 64
     n_heads = max(1, (dim + 127) // 128)
