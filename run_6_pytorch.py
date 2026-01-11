@@ -31,6 +31,7 @@ class StreamingParquetDataset(IterableDataset):
 
     def __iter__(self):
         worker_info = torch.utils.data.get_worker_info()
+        print(worker_info)
         if worker_info is None:
             num_workers, worker_id = 1, 0
         else:
@@ -394,6 +395,19 @@ if __name__ == "__main__":
     model = model.to(device)
     print0('model added to device')
     print('world size ', world_size)
+
+    if world_size > 1:
+        dist.barrier()
+        print(f"[Rank {rank}] Barrier passed, about to broadcast test")
+        
+        # Test if NCCL collectives work at all
+        test_tensor = torch.ones(1, device=device) * rank
+        dist.all_reduce(test_tensor)
+        print(f"[Rank {rank}] all_reduce result: {test_tensor.item()}")
+        
+        print(f"[Rank {rank}] About to wrap DDP")
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+        print(f"[Rank {rank}] DDP complete")
 
     if world_size > 1 and torch.cuda.is_available():
         print0("About to wrap in DDP...")
