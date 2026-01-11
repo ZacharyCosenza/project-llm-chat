@@ -120,6 +120,7 @@ def setup_distributed():
     if world_size > 1:
         dist.init_process_group(backend='nccl' if torch.cuda.is_available() else 'gloo')
         torch.cuda.set_device(local_rank)
+        print('process group initialized')
 
     return rank, world_size, local_rank
 
@@ -394,13 +395,9 @@ if __name__ == "__main__":
     print0('model added to device')
     print('world size ', world_size)
 
-    print0("About to init process group...")
-    dist.init_process_group(backend='nccl')
-    print0("Process group initialized")
-
     if world_size > 1 and torch.cuda.is_available():
         print0("About to wrap in DDP...")
-        model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+        model = DDP(model, device_ids=[device])
         print0('Added model to DDP')
 
     embedding_params = list(model.module.tok_emb.parameters() if isinstance(model, DDP) else model.tok_emb.parameters()) + \
