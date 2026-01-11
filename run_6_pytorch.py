@@ -394,10 +394,14 @@ if __name__ == "__main__":
         if rank == 0:
             print0("No GPU detected, using CPU")
 
+    print0('adding model to device')
     model = model.to(device)
+    print0('model added to device')
+    print(world_size)
 
     if world_size > 1 and torch.cuda.is_available():
         model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+        print0('added model to DDP')
 
     embedding_params = list(model.module.tok_emb.parameters() if isinstance(model, DDP) else model.tok_emb.parameters()) + \
                        list(model.module.pos_emb.parameters() if isinstance(model, DDP) else model.pos_emb.parameters())
@@ -426,9 +430,11 @@ if __name__ == "__main__":
         rank=rank,
         world_size=world_size
     )
+    print0('loaders created')
 
     use_wandb = rank == 0
     if use_wandb:
+        print('im gonna use wandb for logging here!')
         wandb.init(
             project="llm-training",
             name="test",
@@ -468,6 +474,7 @@ if __name__ == "__main__":
         max_steps = args.fast_dev_run
 
     while global_step < max_steps:
+        print0('starting training!')
         global_step = train_epoch(
             model, train_loader, optimizer, scaler, device, rank, world_size,
             global_step, max_steps, warmup_ratio, warmdown_ratio, final_lr_frac,
