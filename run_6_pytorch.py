@@ -383,11 +383,6 @@ if __name__ == "__main__":
         num_gpus = torch.cuda.device_count()
         if rank == 0:
             print0(f"Detected {num_gpus} GPU(s): {[torch.cuda.get_device_name(i) for i in range(num_gpus)]}")
-    elif torch.backends.mps.is_available():
-        device = torch.device('mps')
-        accelerator = 'mps'
-        if rank == 0:
-            print0("Detected Apple MPS device")
     else:
         device = torch.device('cpu')
         accelerator = 'cpu'
@@ -397,11 +392,16 @@ if __name__ == "__main__":
     print0('adding model to device')
     model = model.to(device)
     print0('model added to device')
-    print(world_size)
+    print('world size ', world_size)
+
+    print0("About to init process group...")
+    dist.init_process_group(backend='nccl')
+    print0("Process group initialized")
 
     if world_size > 1 and torch.cuda.is_available():
+        print0("About to wrap in DDP...")
         model = DDP(model, device_ids=[local_rank], output_device=local_rank)
-        print0('added model to DDP')
+        print0('Added model to DDP')
 
     embedding_params = list(model.module.tok_emb.parameters() if isinstance(model, DDP) else model.tok_emb.parameters()) + \
                        list(model.module.pos_emb.parameters() if isinstance(model, DDP) else model.pos_emb.parameters())
