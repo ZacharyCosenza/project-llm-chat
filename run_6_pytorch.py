@@ -160,7 +160,7 @@ def reduce_tensor(tensor, world_size):
 def train_epoch(model, train_loader, optimizer, scaler, device, rank, world_size,
                 global_step, max_steps, warmup_ratio, warmdown_ratio, final_lr_frac,
                 base_lrs, accumulate_grad_batches, gradient_clip_val, log_every_n_steps,
-                use_wandb, pbar):
+                use_wandb, pbar, val_check_interval, val_loader, tokenizer, limit_val_batches):
     model.train()
     optimizer.zero_grad()
 
@@ -227,6 +227,11 @@ def train_epoch(model, train_loader, optimizer, scaler, device, rank, world_size
 
             pbar.update(1)
 
+            if global_step % val_check_interval == 0:
+                validate(model, val_loader, device, rank, world_size, global_step,
+                        tokenizer, use_wandb, limit_val_batches)
+                model.train()  # Set back to training mode after validation
+
             if global_step >= max_steps:
                 break
 
@@ -288,10 +293,7 @@ def validate(model, val_loader, device, rank, world_size, global_step, tokenizer
         world_knowledge_results = run_world_knowledge_validation(
             base_model,
             tokenizer,
-            device=device,
-            max_new_tokens=20,
-            temperature=0.3,
-            top_k=40
+            device=device
         )
 
         if 'metrics' in world_knowledge_results:
@@ -301,10 +303,7 @@ def validate(model, val_loader, device, rank, world_size, global_step, tokenizer
         sentence_completions = run_sentence_completion(
             base_model,
             tokenizer,
-            device=device,
-            max_new_tokens=50,
-            temperature=0.8,
-            top_k=40
+            device=device
         )
 
         if use_wandb:
@@ -401,20 +400,15 @@ if __name__ == "__main__":
     if world_size > 1:
         dist.barrier()
         print(f"[Rank {rank}] Barrier passed, about to broadcast test")
-        
+
         # Test if NCCL collectives work at all
         test_tensor = torch.ones(1, device=device) * rank
         dist.all_reduce(test_tensor)
         print(f"[Rank {rank}] all_reduce result: {test_tensor.item()}")
-        
+
         print(f"[Rank {rank}] About to wrap DDP")
         model = DDP(model, device_ids=[local_rank], output_device=local_rank)
         print(f"[Rank {rank}] DDP complete")
-
-    if world_size > 1 and torch.cuda.is_available():
-        print0("About to wrap in DDP...")
-        model = DDP(model, device_ids=[device])
-        print0('Added model to DDP')
 
     embedding_params = list(model.module.tok_emb.parameters() if isinstance(model, DDP) else model.tok_emb.parameters()) + \
                        list(model.module.pos_emb.parameters() if isinstance(model, DDP) else model.pos_emb.parameters())
@@ -492,12 +486,8 @@ if __name__ == "__main__":
             model, train_loader, optimizer, scaler, device, rank, world_size,
             global_step, max_steps, warmup_ratio, warmdown_ratio, final_lr_frac,
             base_lrs, accumulate_grad_batches, gradient_clip_val, log_every_n_steps,
-            use_wandb, pbar
+            use_wandb, pbar, val_check_interval, val_loader, tokenizer, limit_val_batches
         )
-
-        if global_step % val_check_interval == 0 or global_step >= max_steps:
-            validate(model, val_loader, device, rank, world_size, global_step,
-                    tokenizer, use_wandb, limit_val_batches)
 
     pbar.close()
 

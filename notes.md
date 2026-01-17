@@ -14,7 +14,7 @@ The major goal of this set of experiments is to learn more about the following (
 
 # Estimation of number of iterations
 
-K suggests three methods of setting the number of iterations: (1) direct, (2) target FLOPS, (3) parameter to data ratio. Interestingly (according to Claude) the concept of epochs is not popular with these larger models so we'll ignore and only focus on iterations and assume the datasets are so large we don't get a change to revisit.
+K suggests three methods of setting the number of iterations: (1) direct, (2) target FLOPS, (3) parameter to data ratio. Interestingly (according to Claude) the concept of epochs is not popular with these larger models so we'll ignore and only focus on iterations and assume the datasets are so large we don't get a chance to revisit.
 
 1. Just set it based on vibes? IDK 10K?
 2. If we assume a target number of FLOPS of 4e19, and a token requires 6 FLOPS x num_parameters (roughly 2 for forward pass, 4 for backwards pass, don't trust my numbers), and batch size = 524288 we get roughly 28K iterations.
