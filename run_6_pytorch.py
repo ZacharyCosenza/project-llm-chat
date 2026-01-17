@@ -31,7 +31,6 @@ class StreamingParquetDataset(IterableDataset):
 
     def __iter__(self):
         worker_info = torch.utils.data.get_worker_info()
-        print(worker_info)
         if worker_info is None:
             num_workers, worker_id = 1, 0
         else:
@@ -49,17 +48,13 @@ class StreamingParquetDataset(IterableDataset):
         sequences_yielded = 0
 
         for file_idx in cycle(range(len(files))) if self.max_sequences else range(len(files)):
-            print(file_idx)
             if file_idx % total_shards != shard_id:
                 continue
             filepath = files[file_idx]
-            print(filepath)
             pf = pq.ParquetFile(filepath)
-            print(pf)
             for rg_idx in range(pf.metadata.num_row_groups):
                 table = pf.read_row_group(rg_idx, columns=['text'])
                 for text in table['text'].to_pylist():
-                    print(text[:10])
                     tokens = self.tokenizer.encode(text, add_special_tokens=False)
                     buffer.extend(tokens)
                     buffer.append(self.tokenizer.eos_token_id)
