@@ -1,7 +1,7 @@
-apt update -y
-apt install vim -y
-apt install tmux -y
-apt install python3.11 python3.11-venv python3.11-distutils -y
+sudo apt update -y
+sudo apt install vim -y
+sudo apt install tmux -y
+sudo apt install python3.11 python3.11-venv python3.11-distutils -y
 
 python3.11 -m venv .venv
 source .venv/bin/activate

@@ -54,13 +54,24 @@ def test_gpu():
         num_gpus = torch.cuda.device_count()
         print(f"\nDetected {num_gpus} CUDA GPU(s):")
         for i in range(num_gpus):
-            gpu_name = torch.cuda.get_device_name(i)
-            gpu_memory = torch.cuda.get_device_properties(i).total_memory / 1024**3
-            print(f"  GPU {i}: {gpu_name} ({gpu_memory:.2f} GB)")
+            props = torch.cuda.get_device_properties(i)
+            print(f"\n  GPU {i}: {props.name}")
+            print(f"    Total Memory: {props.total_memory / 1024**3:.2f} GB")
+            print(f"    Compute Capability: {props.major}.{props.minor}")
+            print(f"    Multi-Processors: {props.multi_processor_count}")
+
         device = torch.device('cuda:0')
+        current_device = torch.cuda.current_device()
+        print(f"\nCurrent Device: cuda:{current_device}")
+        print(f"CUDA Version: {torch.version.cuda}")
+        print(f"cuDNN Version: {torch.backends.cudnn.version()}")
+        print(f"cuDNN Enabled: {torch.backends.cudnn.enabled}")
     else:
         print("\nNo CUDA GPUs detected. Using CPU.")
         device = torch.device('cpu')
+        print(f"Current Device: {device}")
+
+    print(f"\nPyTorch Version: {torch.__version__}")
 
     # Initialize tokenizer
     print("\nInitializing tokenizer...")
