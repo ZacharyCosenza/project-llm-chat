@@ -8,7 +8,7 @@ import pyarrow.parquet as pq
 from pathlib import Path
 from collections import deque
 import time
-
+import os
 
 class SimpleParquetDataset(IterableDataset):
     """Simple dataset for GPU testing"""
@@ -48,6 +48,8 @@ def test_gpu():
     print("="*60)
     print("GPU Test Function")
     print("="*60)
+
+    os.chdir('/home/zaccosenza/code/project-llm-chat')
 
     # Detect CUDA GPUs
     if torch.cuda.is_available():
