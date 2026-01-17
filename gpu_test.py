@@ -148,9 +148,7 @@ def test_gpu():
 
     # Wrap model in DDP if using multiple GPUs
     if world_size > 1:
-        if rank == 0:
-            print("Wrapping model in DistributedDataParallel...")
-        dist.barrier()
+        print(f"[Rank {rank}] Wrapping model in DistributedDataParallel...")
         model = DDP(model, device_ids=[local_rank], output_device=local_rank)
         print(f"[Rank {rank}] DDP wrapper complete")
 
