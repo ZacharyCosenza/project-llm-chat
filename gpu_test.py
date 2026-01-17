@@ -1,283 +1,155 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.nn.parallel import DistributedDataParallel as DDP
-import torch.distributed as dist
-from core.models import TinyGPT
-from transformers import AutoTokenizer
-from torch.utils.data import IterableDataset, DataLoader
-import pyarrow.parquet as pq
-from pathlib import Path
-from collections import deque
-import time
 import os
+import sys
+import tempfile
+import torch
+import torch.distributed as dist
+import torch.nn as nn
+import torch.optim as optim
+import torch.multiprocessing as mp
 
-class SimpleParquetDataset(IterableDataset):
-    """Simple dataset for GPU testing with multi-GPU support"""
-    def __init__(self, parquet_dir: str, tokenizer, seq_length: int = 512, max_sequences: int = 100,
-                 rank: int = 0, world_size: int = 1):
-        self.files = sorted(Path(parquet_dir).glob("*.parquet"))[:1]  # Use only first file for testing
-        self.tokenizer = tokenizer
-        self.seq_length = seq_length
-        self.max_sequences = max_sequences
-        self.rank = rank
-        self.world_size = world_size
+from torch.nn.parallel import DistributedDataParallel as DDP
 
-    def __iter__(self):
-        # Get worker info for DataLoader workers
-        worker_info = torch.utils.data.get_worker_info()
-        if worker_info is None:
-            num_workers, worker_id = 1, 0
-        else:
-            num_workers, worker_id = worker_info.num_workers, worker_info.id
+# ensure to run pkill -9 python
 
-        # Calculate shard for this rank and worker
-        total_shards = self.world_size * num_workers
-        shard_id = self.rank * num_workers + worker_id
+# On Windows platform, the torch.distributed package only
+# supports Gloo backend, FileStore and TcpStore.
+# For FileStore, set init_method parameter in init_process_group
+# to a local file. Example as follow:
+# init_method="file:///f:/libtmp/some_file"
+# dist.init_process_group(
+#    "gloo",
+#    rank=rank,
+#    init_method=init_method,
+#    world_size=world_size)
+# For TcpStore, same way as on Linux.
 
-        buffer = deque()
-        sequences_yielded = 0
+def setup(rank, world_size):
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+    os.environ['NCCL_DEBUG'] = 'INFO'  # See what NCCL is doing
+    os.environ['NCCL_DEBUG_SUBSYS'] = 'ALL'
 
-        for file_idx, filepath in enumerate(self.files):
-            # Skip files that don't belong to this shard
-            if file_idx % total_shards != shard_id:
-                continue
+    # We want to be able to train our model on an `accelerator <https://pytorch.org/docs/stable/torch.html#accelerators>`__
+    # such as CUDA, MPS, MTIA, or XPU.
+    acc = torch.accelerator.current_accelerator()
+    backend = torch.distributed.get_default_backend_for_device(acc)
+    # initialize the process group
+    dist.init_process_group('gloo', rank=rank, world_size=world_size)
 
-            pf = pq.ParquetFile(filepath)
-            for rg_idx in range(min(2, pf.metadata.num_row_groups)):  # Only read 2 row groups
-                table = pf.read_row_group(rg_idx, columns=['text'])
-                for text in table['text'].to_pylist():
-                    tokens = self.tokenizer.encode(text, add_special_tokens=False)
-                    buffer.extend(tokens)
-                    buffer.append(self.tokenizer.eos_token_id)
+def cleanup():
+    dist.destroy_process_group()
 
-                    while len(buffer) >= self.seq_length + 1:
-                        chunk = [buffer.popleft() for _ in range(self.seq_length + 1)]
-                        yield {
-                            'input_ids': torch.tensor(chunk[:-1], dtype=torch.long),
-                            'labels': torch.tensor(chunk[1:], dtype=torch.long)
-                        }
-                        sequences_yielded += 1
-                        if sequences_yielded >= self.max_sequences:
-                            return
+class ToyModel(nn.Module):
+    def __init__(self):
+        super(ToyModel, self).__init__()
+        self.net1 = nn.Linear(10, 10)
+        self.relu = nn.ReLU()
+        self.net2 = nn.Linear(10, 5)
 
-
-def setup_distributed():
-    """Setup distributed training environment"""
-    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
-        rank = int(os.environ['RANK'])
-        world_size = int(os.environ['WORLD_SIZE'])
-        local_rank = int(os.environ.get('LOCAL_RANK', 0))
-    else:
-        rank = 0
-        world_size = 1
-        local_rank = 0
-
-    if world_size > 1:
-        torch.cuda.set_device(local_rank)
-        dist.init_process_group(backend='nccl', device_id=torch.device(f'cuda:{local_rank}'))
-
-    return rank, world_size, local_rank
+    def forward(self, x):
+        return self.net2(self.relu(self.net1(x)))
 
 
-def cleanup_distributed():
-    """Cleanup distributed training"""
-    if dist.is_initialized():
-        dist.destroy_process_group()
-
-
-def print_rank0(msg, rank):
-    """Print only from rank 0"""
-    if rank == 0:
-        print(msg)
-
-
-def test_gpu():
-    """Test GPU detection and run TinyGPT model for a few iterations"""
-
-    # Setup distributed training
-    rank, world_size, local_rank = setup_distributed()
-
-    print_rank0("="*60, rank)
-    print_rank0("GPU Test Function", rank)
-    print_rank0("="*60, rank)
-
-    # Detect CUDA GPUs
-    if torch.cuda.is_available():
-        num_gpus = torch.cuda.device_count()
-        if rank == 0:
-            print(f"\nDetected {num_gpus} CUDA GPU(s):")
-            for i in range(num_gpus):
-                props = torch.cuda.get_device_properties(i)
-                print(f"\n  GPU {i}: {props.name}")
-                print(f"    Total Memory: {props.total_memory / 1024**3:.2f} GB")
-                print(f"    Compute Capability: {props.major}.{props.minor}")
-                print(f"    Multi-Processors: {props.multi_processor_count}")
-
-            print(f"\nCUDA Version: {torch.version.cuda}")
-            print(f"cuDNN Version: {torch.backends.cudnn.version()}")
-            print(f"cuDNN Enabled: {torch.backends.cudnn.enabled}")
-
-        device = torch.device(f'cuda:{local_rank}')
-        print(f"[Rank {rank}] Using device: {device}")
-    else:
-        print_rank0("\nNo CUDA GPUs detected. Using CPU.", rank)
-        device = torch.device('cpu')
-        print_rank0(f"Current Device: {device}", rank)
-
-    print_rank0(f"\nPyTorch Version: {torch.__version__}", rank)
-    print_rank0(f"World Size: {world_size}", rank)
-    print_rank0(f"Training on {world_size} GPU(s)\n", rank)
-
-    # Initialize tokenizer
-    print_rank0("\nInitializing tokenizer...", rank)
-    tokenizer = AutoTokenizer.from_pretrained("gpt2")
-
-    # Create small TinyGPT model for testing
-    print_rank0("\nCreating TinyGPT model...", rank)
-    model = TinyGPT(
-        vocab_size=tokenizer.vocab_size,
-        dim=256,
-        n_layers=1,
-        n_heads=4,
-        max_seq_len=128
-    ).to(device)
-
+def demo_basic(rank, world_size):
+    print(f"[Rank {rank}] Running basic DDP example on rank {rank}.", flush=True)
+    
+    setup(rank, world_size)
+    print(f"[Rank {rank}] Process group initialized", flush=True)
+    
+    # Check GPU memory
+    free_mem, total_mem = torch.cuda.mem_get_info(rank)
+    print(f"[Rank {rank}] GPU {rank} free memory: {free_mem / 1e9:.2f} GB / {total_mem / 1e9:.2f} GB", flush=True)
+    
+    # Set seed for consistency
+    torch.manual_seed(42)
+    print(f"[Rank {rank}] Creating model...", flush=True)
+    
+    model = ToyModel().to(rank)
+    print(f"[Rank {rank}] Model moved to GPU {rank}", flush=True)
+    
+    # Count parameters
     num_params = sum(p.numel() for p in model.parameters())
-    print_rank0(f"Model parameters: {num_params:,}", rank)
+    print(f"[Rank {rank}] Model has {num_params:,} parameters", flush=True)
+    
+    print(f"[Rank {rank}] Starting DDP wrap (this does parameter broadcast)...", flush=True)
+    ddp_model = DDP(model, device_ids=[rank])
+    print(f"[Rank {rank}] *** DDP WRAP COMPLETE ***", flush=True)
+    
+    loss_fn = nn.MSELoss()
+    optimizer = optim.SGD(ddp_model.parameters(), lr=0.001)
+    
+    print(f"[Rank {rank}] Starting forward pass...", flush=True)
+    optimizer.zero_grad()
+    outputs = ddp_model(torch.randn(20, 10).to(rank))  # Make sure input is on GPU!
+    print(f"[Rank {rank}] Forward pass complete", flush=True)
+    
+    labels = torch.randn(20, 5).to(rank)
+    print(f"[Rank {rank}] Starting backward pass...", flush=True)
+    loss_fn(outputs, labels).backward()
+    print(f"[Rank {rank}] Backward pass complete", flush=True)
+    
+    print(f"[Rank {rank}] Starting optimizer step...", flush=True)
+    optimizer.step()
+    print(f"[Rank {rank}] Optimizer step complete", flush=True)
+    
+    cleanup()
+    print(f"[Rank {rank}] Finished running basic DDP example.", flush=True)
 
-    # Wrap model in DDP if using multiple GPUs
-    if world_size > 1:
-        print(f"[Rank {rank}] Wrapping model in DistributedDataParallel...")
-        model = DDP(model, device_ids=[local_rank], output_device=local_rank)
-        print(f"[Rank {rank}] DDP wrapper complete")
 
-    # Create dataset and dataloader
-    print_rank0("\nLoading dataset...", rank)
-    seq_length = 128  # Match model's max_seq_len
-    dataset = SimpleParquetDataset(
-        parquet_dir='data/base_data',
-        tokenizer=tokenizer,
-        seq_length=seq_length,
-        max_sequences=10,
-        rank=rank,
-        world_size=world_size
-    )
+def run_demo(demo_fn, world_size):
+    mp.spawn(demo_fn,
+             args=(world_size,),
+             nprocs=world_size,
+             join=True)
 
-    dataloader = DataLoader(
-        dataset,
-        batch_size=4,
-        collate_fn=lambda batch: {
-            'input_ids': torch.stack([x['input_ids'] for x in batch]),
-            'labels': torch.stack([x['labels'] for x in batch])
-        },
-        num_workers=0  # Keep simple for testing
-    )
+def demo_checkpoint(rank, world_size):
+    print(f"Running DDP checkpoint example on rank {rank}.")
+    setup(rank, world_size)
 
-    # Setup optimizer
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    model = ToyModel().to(rank)
+    ddp_model = DDP(model, device_ids=[rank])
 
-    # Training loop for a few iterations
-    print_rank0("\nRunning training for 5 iterations...", rank)
-    print_rank0("-"*60, rank)
 
-    model.train()
-    for i, batch in enumerate(dataloader):
-        if i >= 5:  # Only run 5 iterations
-            break
+    CHECKPOINT_PATH = tempfile.gettempdir() + "/model.checkpoint"
+    if rank == 0:
+        # All processes should see same parameters as they all start from same
+        # random parameters and gradients are synchronized in backward passes.
+        # Therefore, saving it in one process is sufficient.
+        torch.save(ddp_model.state_dict(), CHECKPOINT_PATH)
 
-        start_time = time.time()
+    # Use a barrier() to make sure that process 1 loads the model after process
+    # 0 saves it.
+    dist.barrier()
+    # We want to be able to train our model on an `accelerator <https://pytorch.org/docs/stable/torch.html#accelerators>`__
+    # such as CUDA, MPS, MTIA, or XPU.
+    acc = torch.accelerator.current_accelerator()
+    # configure map_location properly
+    map_location = {f'{acc}:0': f'{acc}:{rank}'}
+    ddp_model.load_state_dict(
+        torch.load(CHECKPOINT_PATH, map_location=map_location, weights_only=True))
 
-        # Move batch to device
-        input_ids = batch['input_ids'].to(device)
-        labels = batch['labels'].to(device)
+    loss_fn = nn.MSELoss()
+    optimizer = optim.SGD(ddp_model.parameters(), lr=0.001)
 
-        # Forward pass
-        logits = model(input_ids)
-        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
+    optimizer.zero_grad()
+    outputs = ddp_model(torch.randn(20, 10))
+    labels = torch.randn(20, 5).to(rank)
 
-        # Backward pass
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+    loss_fn(outputs, labels).backward()
+    optimizer.step()
 
-        # Calculate metrics
-        elapsed = time.time() - start_time
-        tokens_per_sec = (input_ids.numel() / elapsed)
+    # Not necessary to use a dist.barrier() to guard the file deletion below
+    # as the AllReduce ops in the backward pass of DDP already served as
+    # a synchronization.
 
-        # Synchronize loss across all GPUs for accurate reporting
-        if world_size > 1:
-            loss_tensor = loss.detach().clone()
-            dist.all_reduce(loss_tensor, op=dist.ReduceOp.AVG)
-            avg_loss = loss_tensor.item()
-        else:
-            avg_loss = loss.item()
+    if rank == 0:
+        os.remove(CHECKPOINT_PATH)
 
-        # Each rank prints its own metrics
-        print(f"[Rank {rank}] Iteration {i+1}/5:")
-        print(f"  Loss (local): {loss.item():.4f} | Loss (avg): {avg_loss:.4f}")
-        print(f"  Time: {elapsed:.3f}s")
-        print(f"  Throughput: {tokens_per_sec:.0f} tokens/sec")
-
-        # Detailed GPU monitoring - each rank monitors its own GPU
-        if torch.cuda.is_available():
-            print(f"\n  [Rank {rank}] GPU {local_rank} Information ({torch.cuda.get_device_name(local_rank)}):")
-
-            # Memory statistics for this GPU
-            mem_allocated = torch.cuda.memory_allocated(local_rank) / 1024**3
-            mem_reserved = torch.cuda.memory_reserved(local_rank) / 1024**3
-            mem_free = (torch.cuda.get_device_properties(local_rank).total_memory / 1024**3) - mem_allocated
-
-            print(f"    Memory Allocated: {mem_allocated:.2f} GB")
-            print(f"    Memory Reserved:  {mem_reserved:.2f} GB")
-            print(f"    Memory Free:      {mem_free:.2f} GB")
-
-            # Memory stats
-            try:
-                mem_stats = torch.cuda.memory_stats(local_rank)
-                active_bytes = mem_stats.get('active_bytes.all.current', 0) / 1024**3
-                inactive_bytes = mem_stats.get('inactive_split_bytes.all.current', 0) / 1024**3
-
-                print(f"    Active Memory:    {active_bytes:.2f} GB")
-                print(f"    Inactive Memory:  {inactive_bytes:.2f} GB")
-
-                # Allocation stats
-                alloc_count = mem_stats.get('allocation.all.current', 0)
-                free_count = mem_stats.get('segment.all.current', 0)
-                print(f"    Allocations:      {alloc_count}")
-                print(f"    Segments:         {free_count}")
-            except:
-                pass
-
-            # Temperature and utilization (if nvidia-smi is available)
-            try:
-                import subprocess
-                result = subprocess.run(
-                    ['nvidia-smi', '--query-gpu=utilization.gpu,utilization.memory,temperature.gpu,power.draw,power.limit',
-                     '--format=csv,noheader,nounits', f'--id={local_rank}'],
-                    capture_output=True, text=True, timeout=1
-                )
-                if result.returncode == 0:
-                    gpu_util, mem_util, temp, power_draw, power_limit = result.stdout.strip().split(',')
-                    print(f"    GPU Utilization:  {gpu_util.strip()}%")
-                    print(f"    Mem Utilization:  {mem_util.strip()}%")
-                    print(f"    Temperature:      {temp.strip()}°C")
-                    print(f"    Power Draw:       {power_draw.strip()}W / {power_limit.strip()}W")
-            except:
-                pass
-        print()
-
-        # Synchronize all ranks before next iteration
-        if world_size > 1:
-            dist.barrier()
-
-    print_rank0("="*60, rank)
-    print_rank0("GPU test completed successfully!", rank)
-    print_rank0("="*60, rank)
-
-    # Cleanup
-    cleanup_distributed()
-
+    cleanup()
+    print(f"Finished running DDP checkpoint example on rank {rank}.")
 
 if __name__ == "__main__":
-    test_gpu()
+    n_gpus = torch.accelerator.device_count()
+    assert n_gpus >= 2, f"Requires at least 2 GPUs to run, but got {n_gpus}"
+    world_size = n_gpus
+    run_demo(demo_basic, world_size)

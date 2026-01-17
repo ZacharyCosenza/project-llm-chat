@@ -116,7 +116,7 @@ def setup_distributed():
     if world_size > 1:
         torch.cuda.set_device(local_rank)  # Set device BEFORE init_process_group
         dist.init_process_group(
-            backend='nccl',
+            backend='gloo',
             device_id=torch.device(f'cuda:{local_rank}')  # Explicit device
         )
 
