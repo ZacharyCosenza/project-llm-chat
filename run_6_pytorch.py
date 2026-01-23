@@ -114,10 +114,10 @@ def setup_distributed():
         local_rank = 0
 
     if world_size > 1:
-        torch.cuda.set_device(local_rank)  # Set device BEFORE init_process_group
+        torch.cuda.set_device(local_rank)
         dist.init_process_group(
             backend='gloo',
-            device_id=torch.device(f'cuda:{local_rank}')  # Explicit device
+            device_id=torch.device(f'cuda:{local_rank}')
         )
 
     return rank, world_size, local_rank
@@ -225,7 +225,7 @@ def train_epoch(model, train_loader, optimizer, scaler, device, rank, world_size
             if global_step % val_check_interval == 0:
                 validate(model, val_loader, device, rank, world_size, global_step,
                         tokenizer, use_wandb, limit_val_batches)
-                model.train()  # Set back to training mode after validation
+                model.train()
 
             if global_step >= max_steps:
                 break
@@ -281,6 +281,13 @@ def validate(model, val_loader, device, rank, world_size, global_step, tokenizer
             'global_step': global_step
         }
 
+        if torch.cuda.is_available():
+            log_dict.update({
+                'memory/val_allocated_gb': torch.cuda.memory_allocated() / 1024**3,
+                'memory/val_reserved_gb': torch.cuda.memory_reserved() / 1024**3,
+                'memory/val_max_allocated_gb': torch.cuda.max_memory_allocated() / 1024**3
+            })
+
         from core.validation import run_world_knowledge_validation, run_sentence_completion
 
         base_model = model.module if isinstance(model, DDP) else model
@@ -318,6 +325,9 @@ def validate(model, val_loader, device, rank, world_size, global_step, tokenizer
 
         print0(f"\nValidation - Loss: {avg_loss_reduced:.4f}, PPL: {avg_ppl_reduced:.4f}, Acc: {avg_acc_reduced:.4f}")
 
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+
     return avg_loss_reduced
 
 if __name__ == "__main__":
@@ -338,7 +348,7 @@ if __name__ == "__main__":
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
 
     n_layers = 20
-    max_seq_len = 128
+    max_seq_len = 2048 // 2
     batch_size = args.batch_size
     dim = n_layers * 64
     n_heads = max(1, (dim + 127) // 128)
@@ -396,7 +406,6 @@ if __name__ == "__main__":
         dist.barrier()
         print(f"[Rank {rank}] Barrier passed, about to broadcast test")
 
-        # Test if NCCL collectives work at all
         test_tensor = torch.ones(1, device=device) * rank
         dist.all_reduce(test_tensor)
         print(f"[Rank {rank}] all_reduce result: {test_tensor.item()}")
