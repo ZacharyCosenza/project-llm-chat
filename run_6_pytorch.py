@@ -86,7 +86,8 @@ def create_dataloaders(train_dir, val_dir, tokenizer, batch_size, seq_length,
     )
     train_loader = DataLoader(
         train_dataset, batch_size=batch_size, collate_fn=collate_fn,
-        num_workers=num_workers, pin_memory=True, prefetch_factor=2
+        num_workers=num_workers, pin_memory=True,
+        prefetch_factor=2 if num_workers > 0 else None
     )
 
     per_gpu_sequences = val_sequences // world_size
