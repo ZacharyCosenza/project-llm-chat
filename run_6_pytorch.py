@@ -153,10 +153,78 @@ def reduce_tensor(tensor, world_size):
         return rt
     return tensor
 
+
+def save_checkpoint(model, optimizer, scaler, global_step, checkpoint_dir, rank):
+    """Save training checkpoint. Only rank 0 saves to avoid conflicts. Removes old checkpoints to save space."""
+    if rank != 0:
+        return
+
+    checkpoint_dir = Path(checkpoint_dir)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    base_model = model.module if isinstance(model, DDP) else model
+
+    checkpoint = {
+        'global_step': global_step,
+        'model_state_dict': base_model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scaler_state_dict': scaler.state_dict(),
+    }
+
+    # Save only as 'latest' to save memory - remove old checkpoints
+    latest_path = checkpoint_dir / "checkpoint_latest.pt"
+    torch.save(checkpoint, latest_path)
+    print0(f"Saved checkpoint to {latest_path} (step {global_step})")
+
+
+def find_latest_checkpoint(checkpoint_dir):
+    """Find the most recent checkpoint in the directory."""
+    checkpoint_dir = Path(checkpoint_dir)
+    if not checkpoint_dir.exists():
+        return None
+
+    # First check for 'latest' checkpoint
+    latest_path = checkpoint_dir / "checkpoint_latest.pt"
+    if latest_path.exists():
+        return latest_path
+
+    # Otherwise find highest step checkpoint
+    checkpoints = list(checkpoint_dir.glob("checkpoint_step_*.pt"))
+    if not checkpoints:
+        return None
+
+    # Sort by step number
+    def get_step(path):
+        try:
+            return int(path.stem.split('_')[-1])
+        except ValueError:
+            return -1
+
+    checkpoints.sort(key=get_step, reverse=True)
+    return checkpoints[0]
+
+
+def load_checkpoint(checkpoint_path, model, optimizer, scaler, device):
+    """Load checkpoint and return the global step."""
+    print0(f"Loading checkpoint from {checkpoint_path}")
+
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+
+    base_model = model.module if isinstance(model, DDP) else model
+    base_model.load_state_dict(checkpoint['model_state_dict'])
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    scaler.load_state_dict(checkpoint['scaler_state_dict'])
+
+    global_step = checkpoint['global_step']
+    print0(f"Resumed from step {global_step}")
+
+    return global_step
+
 def train_epoch(model, train_loader, optimizer, scaler, device, rank, world_size,
                 global_step, max_steps, warmup_ratio, warmdown_ratio, final_lr_frac,
                 base_lrs, accumulate_grad_batches, gradient_clip_val, log_every_n_steps,
-                use_wandb, pbar, val_check_interval, val_loader, tokenizer, limit_val_batches):
+                use_wandb, pbar, val_check_interval, val_loader, tokenizer, limit_val_batches,
+                checkpoint_dir=None):
     model.train()
     optimizer.zero_grad()
 
@@ -227,6 +295,12 @@ def train_epoch(model, train_loader, optimizer, scaler, device, rank, world_size
                 validate(model, val_loader, device, rank, world_size, global_step,
                         tokenizer, use_wandb, limit_val_batches)
                 model.train()
+
+                # Save checkpoint after validation
+                if checkpoint_dir:
+                    save_checkpoint(model, optimizer, scaler, global_step, checkpoint_dir, rank)
+                    if world_size > 1:
+                        dist.barrier()  # Ensure all ranks wait for checkpoint save
 
             if global_step >= max_steps:
                 break
@@ -334,6 +408,8 @@ if __name__ == "__main__":
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training')
     parser.add_argument('--max_steps', type=int, default=10000, help='Maximum training steps')
     parser.add_argument('--fast_dev_run', type=int, default=0, help='Run a quick test with N batches')
+    parser.add_argument('--resume', type=str, default=None,
+                        help='Path to checkpoint file or run directory (e.g., logs/{run_id}/) to resume from')
     args = parser.parse_args()
 
     rank, world_size, local_rank = setup_distributed()
@@ -435,7 +511,7 @@ if __name__ == "__main__":
         tokenizer,
         batch_size,
         max_seq_len,
-        num_workers=4,
+        num_workers=0,  # Reduced from 4 to avoid shm issues in containers
         val_sequences=1000,
         rank=rank,
         world_size=world_size
@@ -443,12 +519,20 @@ if __name__ == "__main__":
     print0('loaders created')
 
     use_wandb = rank == 0
+    wandb_run_id = None
     if use_wandb:
         print('im gonna use wandb for logging here!')
+        # Generate run ID upfront so we can use it for both wandb and checkpoint directories
+        wandb_run_id = wandb.util.generate_id()
+        run_dir = logs_dir / wandb_run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+
         wandb.init(
             project="llm-training",
             name="test",
-            dir=str(logs_dir),
+            id=wandb_run_id,
+            dir=str(run_dir),
+            resume="allow",
             config={
                 "vocab_size": tokenizer.vocab_size,
                 "dim": dim,
@@ -472,13 +556,52 @@ if __name__ == "__main__":
             }
         )
 
+    # Broadcast wandb run ID to all ranks for consistent checkpoint directory
+    if world_size > 1:
+        if rank == 0:
+            run_id_tensor = torch.zeros(64, dtype=torch.uint8, device=device)
+            if wandb_run_id:
+                run_id_bytes = wandb_run_id.encode('utf-8')[:64]
+                run_id_tensor[:len(run_id_bytes)] = torch.tensor(list(run_id_bytes), dtype=torch.uint8)
+        else:
+            run_id_tensor = torch.zeros(64, dtype=torch.uint8, device=device)
+        dist.broadcast(run_id_tensor, src=0)
+        wandb_run_id = bytes(run_id_tensor.cpu().tolist()).decode('utf-8').rstrip('\x00')
+
+    # Set checkpoint directory inside the run directory (same as wandb)
+    if wandb_run_id:
+        checkpoint_dir = logs_dir / wandb_run_id / "checkpoints"
+    else:
+        checkpoint_dir = logs_dir / "no_wandb" / "checkpoints"
+
     accumulate_grad_batches = 4
     gradient_clip_val = 1.0
     log_every_n_steps = 10
     limit_val_batches = batch_size
 
+    print0(f"Checkpoints will be saved to: {checkpoint_dir}")
+
     global_step = 0
-    pbar = tqdm(total=max_steps, disable=(rank != 0), desc="Training")
+
+    # Resume from checkpoint if requested
+    if args.resume:
+        resume_path = Path(args.resume)
+        if resume_path.is_dir():
+            # If it's a run directory (logs/{run_id}/), look in checkpoints subdirectory
+            ckpt_subdir = resume_path / "checkpoints"
+            if ckpt_subdir.exists():
+                checkpoint_path = find_latest_checkpoint(ckpt_subdir)
+            else:
+                checkpoint_path = find_latest_checkpoint(resume_path)
+        else:
+            checkpoint_path = resume_path
+
+        if checkpoint_path and checkpoint_path.exists():
+            global_step = load_checkpoint(checkpoint_path, model, optimizer, scaler, device)
+        else:
+            print0(f"No checkpoint found at {args.resume}, starting from scratch")
+
+    pbar = tqdm(total=max_steps, initial=global_step, disable=(rank != 0), desc="Training")
 
     if args.fast_dev_run > 0:
         max_steps = args.fast_dev_run
@@ -489,10 +612,12 @@ if __name__ == "__main__":
             model, train_loader, optimizer, scaler, device, rank, world_size,
             global_step, max_steps, warmup_ratio, warmdown_ratio, final_lr_frac,
             base_lrs, accumulate_grad_batches, gradient_clip_val, log_every_n_steps,
-            use_wandb, pbar, val_check_interval, val_loader, tokenizer, limit_val_batches
+            use_wandb, pbar, val_check_interval, val_loader, tokenizer, limit_val_batches,
+            checkpoint_dir=checkpoint_dir
         )
 
     pbar.close()
+    print0(f"Training complete at step {global_step}")
 
     if use_wandb:
         wandb.finish()

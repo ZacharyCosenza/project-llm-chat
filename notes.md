@@ -55,7 +55,7 @@ However, I am still running into an issue where, under certain conditions like v
 
 NCCL_P2P_DISABLE=1 torchrun --nproc_per_node=X run_X.py
 
-In further experiments, the VRAM memory issue, while resolved from a leakage perspective, still came up as the memory usage sits near the edge of OOM. So when certain validation steps pushed memory outside this bound the program fails. I find this odd for two reasons: (1) we are not keeping any artifacts of validation in memory and (2) the differences between validation steps in terms of memory is small.
+In further experiments, the VRAM memory issue, while resolved from a leakage perspective, still came up as the memory usage sits near the edge of OOM. So when certain validation steps pushed memory outside this bound the program fails. I find this odd for two reasons: (1) we are not keeping any artifacts of validation in memory and (2) the differences between validation steps in terms of memory is small. I removed the external validation steps as they required downloading artifacts, which may be held in memory in uncontrolled ways. 
 
 # Creating a set for validation
 
