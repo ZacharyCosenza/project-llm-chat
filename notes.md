@@ -51,10 +51,12 @@ I also had Claude rewrite the entire script, using the loading of parquet files 
 
 [Figure 2](/images/fig2_goodmemory.png)
 
-However, I am still running into an issue where, under certain conditions like various number of GPUs, the script itself starts but hangs.
+However, I am still running into an issue where, under certain conditions like various number of GPUs, the script itself starts but hangs. The issue seemed to resolve itself by running without P2P communication via the following:
+
+NCCL_P2P_DISABLE=1 torchrun --nproc_per_node=X run_X.py
+
+In further experiments, the VRAM memory issue, while resolved from a leakage perspective, still came up as the memory usage sits near the edge of OOM. So when certain validation steps pushed memory outside this bound the program fails. I find this odd for two reasons: (1) we are not keeping any artifacts of validation in memory and (2) the differences between validation steps in terms of memory is small.
 
 # Creating a set for validation
 
 The paradigm here is only having training and validation. We hold out a parquet file for validation. I had been using perplexity but I want to add some additional tests. I have started with a set of sentence completions that will be printed as well as some basic world knowledge compeltion tasks. This required adding a predict function to the model to make autoregressive temperature-normalized predictions until a max token limit. I also have started to add the rest of the ~1k parquet files to my machine which required increasing the storage size. 
-
-NCCL_P2P_DISABLE=1 torchrun --nproc_per_node=4 run_6_pytorch.py

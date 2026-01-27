@@ -16,6 +16,7 @@ import pyarrow.parquet as pq
 import os
 import wandb
 from tqdm import tqdm
+from core.validation import run_world_knowledge_validation, run_sentence_completion
 
 class StreamingParquetDataset(IterableDataset):
     def __init__(self, parquet_dir: str, tokenizer, seq_length: int = 2048,
@@ -288,8 +289,6 @@ def validate(model, val_loader, device, rank, world_size, global_step, tokenizer
                 'memory/val_max_allocated_gb': torch.cuda.max_memory_allocated() / 1024**3
             })
 
-        from core.validation import run_world_knowledge_validation, run_sentence_completion
-
         base_model = model.module if isinstance(model, DDP) else model
 
         world_knowledge_results = run_world_knowledge_validation(
@@ -348,7 +347,7 @@ if __name__ == "__main__":
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
 
     n_layers = 20
-    max_seq_len = 2048 // 2
+    max_seq_len = 2048 // 4
     batch_size = args.batch_size
     dim = n_layers * 64
     n_heads = max(1, (dim + 127) // 128)
