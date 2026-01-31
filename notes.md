@@ -8,9 +8,7 @@ The major goal of this set of experiments is to learn more about the following (
 # TODO
 
 - Add CORE eval
-- Research KV caching
 - Understanding number of iterations from FLOPs
-- Understanding of memory usage (weights, gradients, activations, data)
 
 # Estimation of number of iterations
 
@@ -18,7 +16,9 @@ K suggests three methods of setting the number of iterations: (1) direct, (2) ta
 
 1. Just set it based on vibes? IDK 10K?
 2. If we assume a target number of FLOPS of 4e19, and a token requires 6 FLOPS x num_parameters (roughly 2 for forward pass, 4 for backwards pass, don't trust my numbers), and batch size = 524288 we get roughly 28K iterations.
-3. Assume a optimal 20:1 ratio, if our LLM has 461M parameters, that requires 9.2B tokens (data = tokens always). If batch size = 524288 we get 17.5K iterations.
+3. Assume a optimal 20:1 (token:parameter) ratio, if our LLM has 524M parameters, that requires ~10B tokens. 
+
+If batch size = 524288 we get 17.5K iterations. Given 1.7K shards, at roughly 53K rows of data that gives us ~100B GPT2 tokens available in training. For a model of 461M parameters we only need ~10% of this data. 
 
 Further breaking down the training, we must understand the concept of multi-GPU. If we have 8XH100 GPUs with batch_size capability for the H100, we have 8 * batch_size which is good for (1) speed and (2) model quality. Next, remember that for a sequence, when it is passed into the tokenizer we always pad/truncate to a particular max_length = 2048. It is good to think of us thus having max_length x batch_size x num_gpu tokens per iteration. Furthermore, if we have gradient accumulation we squeeze out an additional x accumulation_steps of compute. 
 

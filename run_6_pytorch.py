@@ -419,12 +419,12 @@ if __name__ == "__main__":
     logs_dir.mkdir(exist_ok=True)
 
     max_steps = args.max_steps
-    val_check_interval = 250
+    val_check_interval = 50
 
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
 
     n_layers = 20
-    max_seq_len = 2048 // 4
+    max_seq_len = 2048
     batch_size = args.batch_size
     dim = n_layers * 64
     n_heads = max(1, (dim + 127) // 128)
