@@ -7,6 +7,7 @@ The major goal of this set of experiments is to learn more about the following (
 
 # TODO
 
+- Gradient accumulation
 - Add CORE eval
 - Understanding number of iterations from FLOPs
 
@@ -16,9 +17,7 @@ K suggests three methods of setting the number of iterations: (1) direct, (2) ta
 
 1. Just set it based on vibes? IDK 10K?
 2. If we assume a target number of FLOPS of 4e19, and a token requires 6 FLOPS x num_parameters (roughly 2 for forward pass, 4 for backwards pass, don't trust my numbers), and batch size = 524288 we get roughly 28K iterations.
-3. Assume a optimal 20:1 (token:parameter) ratio, if our LLM has 524M parameters, that requires ~10B tokens. 
-
-If batch size = 524288 we get 17.5K iterations. Given 1.7K shards, at roughly 53K rows of data that gives us ~100B GPT2 tokens available in training. For a model of 461M parameters we only need ~10% of this data. 
+3. Assume a optimal 20:1 (token:parameter) ratio, if our LLM has 524M parameters, that requires ~10B tokens. If batch size = 524288 we get 17.5K iterations. Given 1.7K shards, at roughly 53K rows of data that gives us ~100B GPT2 tokens available in training. For a model of 461M parameters we only need ~10% of this data. 
 
 Further breaking down the training, we must understand the concept of multi-GPU. If we have 8XH100 GPUs with batch_size capability for the H100, we have 8 * batch_size which is good for (1) speed and (2) model quality. Next, remember that for a sequence, when it is passed into the tokenizer we always pad/truncate to a particular max_length = 2048. It is good to think of us thus having max_length x batch_size x num_gpu tokens per iteration. Furthermore, if we have gradient accumulation we squeeze out an additional x accumulation_steps of compute. 
 
@@ -56,6 +55,10 @@ However, I am still running into an issue where, under certain conditions like v
 NCCL_P2P_DISABLE=1 torchrun --nproc_per_node=X run_X.py
 
 In further experiments, the VRAM memory issue, while resolved from a leakage perspective, still came up as the memory usage sits near the edge of OOM. So when certain validation steps pushed memory outside this bound the program fails. I find this odd for two reasons: (1) we are not keeping any artifacts of validation in memory and (2) the differences between validation steps in terms of memory is small. I removed the external validation steps as they required downloading artifacts, which may be held in memory in uncontrolled ways. Next I ran into a crash on one of the dataloader workers so I am setting num_workers = 0. This should increase stability. With these fixes I can get stable training with batch_size = 16 and max_seq_length = 2024/4, with lack of compute being the only thing holding us back. We are finally getting learning as the model goes from uniform random samples, to modal words (mostly "the" and "\n"), to modal sentence pieces ("United States", "from the") at ~500 iterations. I then switched from A40s to H100s and the speedup (maybe because the lack of multi-GPU communications when comparing 1XH100 vs 8XA40) was dramatic (~20x faster, ~33% lower cost). One issue is that I am using runpod.io service for GPU instances but I often cannot get H100s. I am now testing out moving to lambda.ai as they seem to have many more high quality GPUs.
+
+# Re-estimate of the size/scope of project
+
+After futher experiments, I find that I can use a context window of 2048 for my model and hold it in memory on an H200 GPU with batch_size 22 at ~2.35s/iteration. This is less than the 32 that K uses and I am still investigating this. Let's say I want to keep my model at ~500M parameters and reach the 1e19 FLOP threshhold, this will require ~10B tokens (or about 170 shards). Each iteration FLOP count can be calculated as (batch_size = 22) * (context = 2048) * (num_parameters = 500M) * (forward + backwards = 6) = 1e14. Thus, to get 1e19 FLOP total we need 1e5 (100,000) iterations. This will roughly take 65 hours. I tried to scale to 8XH100 but perhaps due to overhead issues I needed to reduce the batch_size to 18 to still get ~2.4s / iteration. This would then require ~15,000 iterations.
 
 # Creating a set for validation
 

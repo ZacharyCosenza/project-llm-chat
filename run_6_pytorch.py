@@ -437,19 +437,17 @@ if __name__ == "__main__":
         max_seq_len=max_seq_len
     )
 
-    base_lr = 1e-3
-    weight_decay = 0.01
+    weight_decay = 0.0
     warmup_ratio = 0.0
     warmdown_ratio = 0.2
     final_lr_frac = 0.0
 
     lr_scale = (dim / 768) ** -0.5
     print0(f"\n=== Optimizer Configuration ===")
-    print0(f"Base LR: {base_lr}")
     print0(f"LR scale factor: {lr_scale:.4f}")
-    print0(f"Head LR: {0.004 * lr_scale * base_lr:.6f}")
-    print0(f"Embedding LR: {0.2 * lr_scale * base_lr:.6f}")
-    print0(f"Other LR: {0.02 * base_lr:.6f}")
+    print0(f"Head LR: {0.004 * lr_scale:.6f}")
+    print0(f"Embedding LR: {0.2 * lr_scale:.6f}")
+    print0(f"Other LR: {0.02:.6f}")
     print0(f"Weight decay: {weight_decay}")
     print0(f"Warmup ratio: {warmup_ratio}")
     print0(f"Warmdown ratio: {warmdown_ratio}")
@@ -497,9 +495,9 @@ if __name__ == "__main__":
                    list(model.module.ln_f.parameters() if isinstance(model, DDP) else model.ln_f.parameters())
 
     optimizer = torch.optim.AdamW([
-        {'params': head_params, 'lr': 0.004 * lr_scale * base_lr},
-        {'params': embedding_params, 'lr': 0.2 * lr_scale * base_lr},
-        {'params': other_params, 'lr': 0.02 * base_lr}
+        {'params': head_params, 'lr': 0.004 * lr_scale},
+        {'params': embedding_params, 'lr': 0.2 * lr_scale},
+        {'params': other_params, 'lr': 0.02}
     ], betas=(0.8, 0.95), eps=1e-10, weight_decay=weight_decay)
 
     base_lrs = [pg['lr'] for pg in optimizer.param_groups]
@@ -542,11 +540,10 @@ if __name__ == "__main__":
                 "max_seq_len": max_seq_len,
                 "batch_size": batch_size,
                 "seq_length": max_seq_len,
-                "base_lr": base_lr,
                 "lr_scale": lr_scale,
-                "head_lr": 0.004 * lr_scale * base_lr,
-                "embedding_lr": 0.2 * lr_scale * base_lr,
-                "other_lr": 0.02 * base_lr,
+                "head_lr": 0.004 * lr_scale,
+                "embedding_lr": 0.2 * lr_scale,
+                "other_lr": 0.02,
                 "weight_decay": weight_decay,
                 "warmup_ratio": warmup_ratio,
                 "warmdown_ratio": warmdown_ratio,
@@ -575,7 +572,7 @@ if __name__ == "__main__":
     else:
         checkpoint_dir = logs_dir / "no_wandb" / "checkpoints"
 
-    accumulate_grad_batches = 4
+    accumulate_grad_batches = max(1, 4 // world_size)  # keep effective batch constant across GPU counts
     gradient_clip_val = 1.0
     log_every_n_steps = 10
     limit_val_batches = batch_size
