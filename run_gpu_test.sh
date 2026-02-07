@@ -29,14 +29,13 @@ echo "W&B project: ${WANDB_PROJECT}"
 echo "============================================"
 echo ""
 
-# Build CUDA_VISIBLE_DEVICES string (e.g., "0,1,2" for 3 GPUs)
-CUDA_DEVICES=$(seq -s, 0 $((N_GPUS - 1)))
-
-CUDA_VISIBLE_DEVICES=$CUDA_DEVICES torchrun --standalone --nproc_per_node="$N_GPUS" "$SCRIPT_PATH" \
+# PyTorch Lightning handles distributed training internally
+python "$SCRIPT_PATH" \
     --batch-size-per-gpu "$BATCH_SIZE_PER_GPU" \
     --epochs "$EPOCHS" \
     --lr "$LR" \
     --data-dir "$DATA_DIR" \
+    --num-gpus "$N_GPUS" \
     --wandb-project "$WANDB_PROJECT" \
     --run-name "${N_GPUS}gpu_bs${EFFECTIVE_BS}"
 
