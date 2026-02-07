@@ -94,8 +94,8 @@ class ResNet18CIFAR(L.LightningModule):
         preds = outputs.argmax(dim=1)
         self.train_acc(preds, labels)
 
-        self.log("train_loss", loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
-        self.log("train_acc", self.train_acc, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log("train_loss", loss, on_step=True, on_epoch=False, prog_bar=True, sync_dist=True)
+        self.log("train_acc", self.train_acc, on_step=True, on_epoch=False, prog_bar=True, sync_dist=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -106,8 +106,8 @@ class ResNet18CIFAR(L.LightningModule):
         preds = outputs.argmax(dim=1)
         self.val_acc(preds, labels)
 
-        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
-        self.log("val_acc", self.val_acc, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log("val_loss", loss, on_step=True, on_epoch=False, prog_bar=True, sync_dist=True)
+        self.log("val_acc", self.val_acc, on_step=True, on_epoch=False, prog_bar=True, sync_dist=True)
 
     def configure_optimizers(self):
         optimizer = torch.optim.SGD(self.parameters(), lr=self.lr, momentum=0.9, weight_decay=5e-4)
@@ -169,7 +169,7 @@ def main():
         devices=num_gpus,
         strategy="ddp" if num_gpus > 1 else "auto",
         logger=wandb_logger,
-        callbacks=[LearningRateMonitor(logging_interval="epoch")],
+        callbacks=[LearningRateMonitor(logging_interval="step")],
         enable_progress_bar=True,
     )
 
