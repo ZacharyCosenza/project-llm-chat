@@ -297,7 +297,6 @@ def train_epoch(model, train_loader, optimizer, scaler, device, rank, world_size
                         tokenizer, use_wandb, limit_val_batches)
                 model.train()
 
-                # Save checkpoint after validation
                 if checkpoint_dir:
                     save_checkpoint(model, optimizer, scaler, global_step, checkpoint_dir, rank)
                     if world_size > 1:
