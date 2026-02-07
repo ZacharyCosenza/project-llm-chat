@@ -1,5 +1,4 @@
 #!/bin/bash
-set -e  # Exit on error
 
 sudo apt update -y
 sudo apt install -y vim tmux python3.11 python3.11-venv python3.11-dev
