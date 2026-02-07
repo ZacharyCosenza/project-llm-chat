@@ -437,7 +437,7 @@ if __name__ == "__main__":
         max_seq_len=max_seq_len
     )
 
-    base_lr = 0.2
+    base_lr = 0.001
     weight_decay = 0.0
     warmup_ratio = 0.0
     warmdown_ratio = 0.2

@@ -5,4 +5,4 @@ export NCCL_SOCKET_IFNAME=lo
 export NCCL_NET_PLUGIN=none
 export NCCL_NET=Socket
 
-torchrun --nproc_per_node=8 run_6_pytorch.py --batch_size 22
+torchrun --nproc_per_node=8 run_6_pytorch.py --batch_size 18
