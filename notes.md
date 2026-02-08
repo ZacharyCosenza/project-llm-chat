@@ -58,7 +58,17 @@ In further experiments, the VRAM memory issue, while resolved from a leakage per
 
 # Re-estimate of the size/scope of pre-training
 
-After futher experiments, I find that I can use a context window of 2048 for my model and hold it in memory on an H200 GPU with batch_size 22 at ~2.35s/iteration. This is less than the 32 that K uses and I am still investigating this. Let's say I want to keep my model at ~500M parameters and reach the 1e19 FLOP threshhold, this will require ~10B tokens (or about 170 shards). Each iteration FLOP count can be calculated as (batch_size = 22) * (context = 2048) * (num_parameters = 500M) * (forward + backwards = 6) = 1e14. Thus, to get 1e19 FLOP total we need 1e5 (100,000) iterations. This will roughly take 65 hours. I tried to scale to 8XH100 but perhaps due to overhead issues I needed to reduce the batch_size to 18 to still get ~2.4s / iteration. This would then require ~15,000 iterations. The logical next step is to compare the loss curve in single vs multi-GPU setup to validate this approach works, but my loss curves are identical even when increasing the learning rates. I wonder if the optimization is the reason for the difference?
+After futher experiments, I find that I can use a context window of 2048 for my model and hold it in memory on an H200 GPU with batch_size 22 at ~2.35s/iteration. This is less than the 32 that K uses and I am still investigating this. Let's say I want to keep my model at ~500M parameters and reach the 1e19 FLOP threshhold, this will require ~10B tokens (or about 170 shards). Each iteration FLOP count can be calculated as (batch_size = 22) * (context = 2048) * (num_parameters = 500M) * (forward + backwards = 6) * (gradient accumulation = 4) = 4e14. Thus, to get 1e19 FLOP total we need 1e5 (25,000) iterations. Using Chinchilla optimiality I get 20:1 -> 500M --> ~10B tokens --> 55k iterations. Let's split the difference and go with 40k iterations.
+
+I tried to scale to 8XH100 but perhaps due to overhead issues I needed to reduce the batch_size to 18 to still get ~2.4s / iteration. 
+
+This would then require ~15,000 iterations. The logical next step is to compare the loss curve in single vs multi-GPU setup to validate this approach works, but my loss curves are identical even when increasing the learning rates. I ran some experiments and found that it was likley that was an artifact of training with a low learning rate early in pre-training. I just looked up what a common GPT2-style optimization technique looks like and used that, which seemed to work.
+
+# Pre-training
+
+Session 1: I will start pre-training. I first starting running on 2XH100 using batch_size = 22 for ~4k iterations. That gives me 720896000 tokens, so ~9.2B to go!
+
+Session 2: Updated with improved saving. Let's reload the checkpoint and start at iteration 4000. If we use 4XH100. To finish training we'd need only 18k iterations here.
 
 # Creating a set for validation
 

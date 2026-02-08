@@ -139,8 +139,8 @@ def reduce_tensor(tensor, world_size):
     return tensor
 
 
-def save_checkpoint(model, optimizer, scheduler, scaler, global_step, checkpoint_dir, rank):
-    """Save training checkpoint. Only rank 0 saves to avoid conflicts."""
+def save_checkpoint(model, global_step, checkpoint_dir, rank):
+    """Save model weights checkpoint. Only rank 0 saves to avoid conflicts."""
     if rank != 0:
         return
 
@@ -150,29 +150,21 @@ def save_checkpoint(model, optimizer, scheduler, scaler, global_step, checkpoint
     base_model = model.module if isinstance(model, DDP) else model
 
     checkpoint = {
-        'global_step': global_step,
         'model_state_dict': base_model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'scheduler_state_dict': scheduler.state_dict(),
-        'scaler_state_dict': scaler.state_dict(),
     }
 
-    latest_path = checkpoint_dir / "checkpoint_latest.pt"
-    torch.save(checkpoint, latest_path)
-    print0(f"Saved checkpoint to {latest_path} (step {global_step})")
+    path = checkpoint_dir / f"checkpoint_{global_step}.pt"
+    torch.save(checkpoint, path)
+    print0(f"Saved checkpoint to {path} (step {global_step})")
 
 
 def find_latest_checkpoint(checkpoint_dir):
-    """Find the most recent checkpoint in the directory."""
+    """Find the checkpoint with the highest step number."""
     checkpoint_dir = Path(checkpoint_dir)
     if not checkpoint_dir.exists():
         return None
 
-    latest_path = checkpoint_dir / "checkpoint_latest.pt"
-    if latest_path.exists():
-        return latest_path
-
-    checkpoints = list(checkpoint_dir.glob("checkpoint_step_*.pt"))
+    checkpoints = list(checkpoint_dir.glob("checkpoint_*.pt"))
     if not checkpoints:
         return None
 
@@ -186,21 +178,29 @@ def find_latest_checkpoint(checkpoint_dir):
     return checkpoints[0]
 
 
-def load_checkpoint(checkpoint_path, model, optimizer, scheduler, scaler, device):
-    """Load checkpoint and return the global step."""
+def load_checkpoint(checkpoint_path, model, scheduler, device):
+    """Load model weights and infer global step from filename.
+
+    Expects filename format: checkpoint_{step}.pt
+    Scheduler is fast-forwarded to the correct step.
+    """
     print0(f"Loading checkpoint from {checkpoint_path}")
+
+    # Extract step from filename
+    stem = Path(checkpoint_path).stem  # e.g. "checkpoint_500"
+    step_str = stem.split('_')[-1]
+    global_step = int(step_str)
 
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
     base_model = model.module if isinstance(model, DDP) else model
     base_model.load_state_dict(checkpoint['model_state_dict'])
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    if 'scheduler_state_dict' in checkpoint:
-        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-    scaler.load_state_dict(checkpoint['scaler_state_dict'])
 
-    global_step = checkpoint['global_step']
-    print0(f"Resumed from step {global_step}")
+    # Fast-forward scheduler to the correct step
+    for _ in range(global_step):
+        scheduler.step()
+
+    print0(f"Resumed from step {global_step} (scheduler fast-forwarded)")
 
     return global_step
 
@@ -273,7 +273,7 @@ def train_epoch(model, train_loader, optimizer, scheduler, scaler, device, rank,
                 model.train()
 
                 if checkpoint_dir:
-                    save_checkpoint(model, optimizer, scheduler, scaler, global_step, checkpoint_dir, rank)
+                    save_checkpoint(model, global_step, checkpoint_dir, rank)
                     if world_size > 1:
                         dist.barrier()
 
@@ -287,7 +287,6 @@ def validate(model, val_loader, device, rank, world_size, global_step, tokenizer
     model.eval()
     total_loss = 0.0
     total_ppl = 0.0
-    total_acc = 0.0
     num_batches = 0
 
     with torch.no_grad():
@@ -303,31 +302,24 @@ def validate(model, val_loader, device, rank, world_size, global_step, tokenizer
                 loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
 
             ppl = torch.exp(loss)
-            preds = logits.argmax(dim=-1)
-            acc = (preds == labels).float().mean()
 
             total_loss += loss.item()
             total_ppl += ppl.item()
-            total_acc += acc.item()
             num_batches += 1
 
     avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
     avg_ppl = total_ppl / num_batches if num_batches > 0 else 0.0
-    avg_acc = total_acc / num_batches if num_batches > 0 else 0.0
 
     avg_loss_tensor = torch.tensor(avg_loss, device=device)
     avg_ppl_tensor = torch.tensor(avg_ppl, device=device)
-    avg_acc_tensor = torch.tensor(avg_acc, device=device)
 
     avg_loss_reduced = reduce_tensor(avg_loss_tensor, world_size).item()
     avg_ppl_reduced = reduce_tensor(avg_ppl_tensor, world_size).item()
-    avg_acc_reduced = reduce_tensor(avg_acc_tensor, world_size).item()
 
     if rank == 0:
         log_dict = {
             'val/loss': avg_loss_reduced,
             'val/perplexity': avg_ppl_reduced,
-            'val/accuracy': avg_acc_reduced,
             'global_step': global_step
         }
 
@@ -340,15 +332,11 @@ def validate(model, val_loader, device, rank, world_size, global_step, tokenizer
 
         base_model = model.module if isinstance(model, DDP) else model
 
-        world_knowledge_results = run_world_knowledge_validation(
+        run_world_knowledge_validation(
             base_model,
             tokenizer,
             device=device
         )
-
-        if 'metrics' in world_knowledge_results:
-            for k, v in world_knowledge_results['metrics'].items():
-                log_dict[f"val/{k}"] = v
 
         sentence_completions = run_sentence_completion(
             base_model,
@@ -371,7 +359,7 @@ def validate(model, val_loader, device, rank, world_size, global_step, tokenizer
                     )
                 })
 
-        print0(f"\nValidation - Loss: {avg_loss_reduced:.4f}, PPL: {avg_ppl_reduced:.4f}, Acc: {avg_acc_reduced:.4f}")
+        print0(f"\nValidation - Loss: {avg_loss_reduced:.4f}, PPL: {avg_ppl_reduced:.4f}")
 
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
@@ -430,7 +418,7 @@ def create_optimizer_and_scheduler(model, peak_lr, min_lr, weight_decay, warmup_
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train TinyGPT model with GPT-2 standard optimizer')
-    parser.add_argument('--batch_size', type=int, default=16, help='Batch size per GPU')
+    parser.add_argument('--batch_size', type=int, default=22, help='Batch size per GPU')
     parser.add_argument('--max_steps', type=int, default=10000, help='Maximum training steps')
     parser.add_argument('--fast_dev_run', type=int, default=0, help='Run a quick test with N batches')
     parser.add_argument('--resume', type=str, default=None,
@@ -623,7 +611,7 @@ if __name__ == "__main__":
             checkpoint_path = resume_path
 
         if checkpoint_path and checkpoint_path.exists():
-            global_step = load_checkpoint(checkpoint_path, model, optimizer, scheduler, scaler, device)
+            global_step = load_checkpoint(checkpoint_path, model, scheduler, device)
         else:
             print0(f"No checkpoint found at {args.resume}, starting from scratch")
 
