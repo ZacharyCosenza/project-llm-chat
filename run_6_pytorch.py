@@ -405,7 +405,7 @@ def validate(model, val_loader, device, rank, world_size, global_step, tokenizer
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train TinyGPT model')
-    parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training')
+    parser.add_argument('--batch_size', type=int, default=32//2, help='Batch size for training')
     parser.add_argument('--max_steps', type=int, default=10000, help='Maximum training steps')
     parser.add_argument('--fast_dev_run', type=int, default=0, help='Run a quick test with N batches')
     parser.add_argument('--resume', type=str, default=None,
@@ -472,10 +472,14 @@ if __name__ == "__main__":
         if rank == 0:
             print0("No GPU detected, using CPU")
 
+    print0(f"\n=== Training Configuration ===")
+    print0(f"World size: {world_size}")
+    print0(f"Batch size per GPU: {batch_size}")
+    print0(f"Effective batch size: {batch_size * world_size}")
+
     print0('adding model to device')
     model = model.to(device)
     print0('model added to device')
-    print('world size ', world_size)
 
     if world_size > 1:
         dist.barrier()
@@ -520,16 +524,18 @@ if __name__ == "__main__":
 
     use_wandb = rank == 0
     wandb_run_id = None
+    effective_batch_size = batch_size * world_size
+    run_name = f"{world_size}gpu_bs{effective_batch_size}"
+
     if use_wandb:
         print('im gonna use wandb for logging here!')
-        # Generate run ID upfront so we can use it for both wandb and checkpoint directories
         wandb_run_id = wandb.util.generate_id()
         run_dir = logs_dir / wandb_run_id
         run_dir.mkdir(parents=True, exist_ok=True)
 
         wandb.init(
             project="llm-training",
-            name="test",
+            name=run_name,
             id=wandb_run_id,
             dir=str(run_dir),
             resume="allow",
@@ -539,7 +545,9 @@ if __name__ == "__main__":
                 "n_layers": n_layers,
                 "n_heads": n_heads,
                 "max_seq_len": max_seq_len,
-                "batch_size": batch_size,
+                "batch_size_per_gpu": batch_size,
+                "num_gpus": world_size,
+                "effective_batch_size": effective_batch_size,
                 "seq_length": max_seq_len,
                 "base_lr": base_lr,
                 "lr_scale": lr_scale,
@@ -552,7 +560,6 @@ if __name__ == "__main__":
                 "final_lr_frac": final_lr_frac,
                 "max_steps": max_steps,
                 "accelerator": accelerator,
-                "devices": world_size,
             }
         )
 
@@ -576,7 +583,7 @@ if __name__ == "__main__":
 
     accumulate_grad_batches = max(1, 4 // world_size)  # keep effective batch constant across GPU counts
     gradient_clip_val = 1.0
-    log_every_n_steps = 10
+    log_every_n_steps = 1
     limit_val_batches = batch_size
 
     print0(f"Checkpoints will be saved to: {checkpoint_dir}")
