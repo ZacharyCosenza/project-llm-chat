@@ -140,12 +140,16 @@ def reduce_tensor(tensor, world_size):
 
 
 def save_checkpoint(model, global_step, checkpoint_dir, rank):
-    """Save model weights checkpoint. Only rank 0 saves to avoid conflicts."""
+    """Save model weights checkpoint. Only rank 0 saves to avoid conflicts.
+    Removes previous checkpoints to save disk space."""
     if rank != 0:
         return
 
     checkpoint_dir = Path(checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    # Find existing checkpoints before saving
+    old_checkpoints = list(checkpoint_dir.glob("checkpoint_*.pt"))
 
     base_model = model.module if isinstance(model, DDP) else model
 
@@ -156,6 +160,12 @@ def save_checkpoint(model, global_step, checkpoint_dir, rank):
     path = checkpoint_dir / f"checkpoint_{global_step}.pt"
     torch.save(checkpoint, path)
     print0(f"Saved checkpoint to {path} (step {global_step})")
+
+    # Remove previous checkpoints
+    for old_ckpt in old_checkpoints:
+        if old_ckpt != path:
+            old_ckpt.unlink()
+            print0(f"Removed old checkpoint: {old_ckpt}")
 
 
 def find_latest_checkpoint(checkpoint_dir):

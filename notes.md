@@ -66,9 +66,11 @@ This would then require ~15,000 iterations. The logical next step is to compare 
 
 # Pre-training
 
-Session 1: I will start pre-training. I first starting running on 2XH100 using batch_size = 22 for ~4k iterations. That gives me 720896000 tokens, so ~9.2B to go!
+Session 1: I will start pre-training. I first starting running on 2XH100 using batch_size = 22 for ~4k iterations while watching The Brutalist. That gives me 720896000 tokens, so ~9.2B to go (id = qfkhmres)!
 
-Session 2: Updated with improved saving. Let's reload the checkpoint and start at iteration 4000. If we use 4XH100. To finish training we'd need only 18k iterations here.
+Session 2: Updated with improved saving. Let's reload the checkpoint and start at iteration 4000. If we use 4XH100. To finish training we'd need only 18k iterations here, but I needed to reduce batch_size = 18, so we're back up to needing 22k iterations. However I only got through ~500 iterations because I'm in a coffee shop with bad internet connection (id = 46acw8eb)
+
+Session 3: 4500 starting
 
 # Creating a set for validation
 
