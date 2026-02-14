@@ -31,7 +31,7 @@ class TinyGPT(nn.Module):
         num_flops_per_token = 6 * (nparams - nparams_embedding) + 12 * l * h * q * t
         return num_flops_per_token 
        
-    def forward(self, x):
+    def forward(self, x, padding_mask=None):
         B, T = x.shape
         tok_emb = self.tok_emb(x)
         pos_emb = self.pos_emb(torch.arange(T, device=x.device))
@@ -39,7 +39,7 @@ class TinyGPT(nn.Module):
 
         causal_mask = nn.Transformer.generate_square_subsequent_mask(T, device=x.device)
         for block in self.blocks:
-            x = block(x, src_mask=causal_mask, is_causal=True)
+            x = block(x, src_mask=causal_mask, src_key_padding_mask=padding_mask, is_causal=True)
 
         x = self.ln_f(x)
         logits = self.head(x)

@@ -100,3 +100,31 @@ The paradigm here is only having training and validation. We hold out a parquet 
     - Multiple Choice: context + different answers is tokenized for k answers, the choice with the lowest mean loss (for answer only) is picked, accuracy computed as whether you matched the gold standard. Inductive bias here is ICL of answer space.
     - Schema: different context + same answer is tokenized, same metric as above, against loss computed as mean for context segment. Inductive bias here is ICL of context space, requireing more world knowledge and reasoning.
     - Language Modeling: regular continuation with accuracy of argmax token. Inductive bias is strict recall.
+
+# Infrastructure and multi-GPU setup
+
+Through trial and error on RunPod/Lambda cloud GPU instances, I arrived at a working multi-GPU configuration captured in startup.sh and run_pytorch.sh. These are worth documenting because they represent hours of debugging hangs and crashes.
+
+## Environment (startup.sh)
+
+The setup targets cloud GPU pods (Ubuntu-based) with CUDA 12.4. Key choices:
+- Python 3.11 in a venv (not system Python) for isolation
+- PyTorch installed from the cu124 wheel index to match the driver
+- hf_transfer installed for faster HuggingFace dataset downloads (the default requests-based download is painfully slow for 170+ parquet shards)
+- tmux for keeping training alive after SSH disconnects (critical for multi-hour sessions on cloud instances)
+
+## NCCL flags (run_pytorch.sh)
+
+The cloud GPU instances I used (RunPod, Lambda) don't have InfiniBand or NVLink between GPUs, so NCCL's default communication strategy fails or hangs. The working set of flags:
+
+- `NCCL_P2P_DISABLE=1` — Disable peer-to-peer GPU memory access. Without this, training hangs indefinitely at the first all-reduce. This was the original fix discovered during scaling up (mentioned above).
+- `NCCL_IB_DISABLE=1` — Disable InfiniBand transport. The cloud instances don't have IB hardware, but NCCL tries to use it by default and fails silently.
+- `NCCL_SOCKET_IFNAME=lo` — Force NCCL to use the loopback interface. On multi-GPU single-node setups, there's no need for network traffic between GPUs — everything goes through shared memory or sockets on localhost.
+- `NCCL_NET=Socket` and `NCCL_NET_PLUGIN=none` — Force plain socket transport and disable any network plugins. This is the most conservative/compatible transport and avoids issues with missing or misconfigured network plugins on cloud instances.
+- `NCCL_DEBUG=WARN` — Only show warnings, not the firehose of INFO messages. Useful during debugging (can set to INFO or TRACE) but too noisy for normal training.
+
+Together these flags tell NCCL: "don't try anything fancy, just use sockets over loopback." The tradeoff is some communication overhead vs. NVLink/P2P, but for 4-GPU training the bottleneck is compute not communication, so the impact is negligible.
+
+## torchrun
+
+Using `torchrun --standalone` for single-node multi-GPU. The `--standalone` flag handles the rendezvous internally (no need for a separate etcd or c10d store). Each GPU gets its own process with RANK, WORLD_SIZE, and LOCAL_RANK set automatically.

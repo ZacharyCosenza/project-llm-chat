@@ -326,8 +326,9 @@ def stack_pad(tokens, pad_id):
 
 
 @torch.no_grad()
-def forward_get_losses(model, input_ids):
-    logits = model(input_ids)
+def forward_get_losses(model, input_ids, pad_id=None):
+    padding_mask = (input_ids == pad_id) if pad_id is not None else None
+    logits = model(input_ids, padding_mask=padding_mask)
     B, T, V = logits.shape
     targets = torch.roll(input_ids, -1, 1)
     losses = F.cross_entropy(logits.view(B * T, V), targets.view(B * T), reduction='none').view(B, T)
@@ -374,9 +375,10 @@ def evaluate_example(model, tokenizer, item, data, idx, task_meta, device, max_s
                 new_ends.append(e)
         tokens, starts, ends = new_tokens, new_starts, new_ends
 
-    pad_id = tokenizer.eos_token_id
+    pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
     input_ids = stack_pad(tokens, pad_id).to(device)
-    losses, preds = forward_get_losses(model, input_ids)
+    use_pad_mask = tokenizer.pad_token_id is not None
+    losses, preds = forward_get_losses(model, input_ids, pad_id=pad_id if use_pad_mask else None)
 
     if task_type == 'language_modeling':
         si, ei = starts[0], ends[0]
@@ -450,41 +452,53 @@ def run_core_eval(model, tokenizer, device, num_examples=27):
 
         print0(f"\n--- {task_type} ({n} examples) ---")
 
-        examples_done = 0
+        task_data = {}
+        task_cursors = {}
         for task in type_tasks:
-            if examples_done >= n:
-                break
-
             label = task['label']
-            task_meta = {
-                'task_type': task['icl_task_type'],
-                'num_fewshot': task['num_fewshot'][0],
-                'continuation_delimiter': task.get('continuation_delimiter', ' ')
-            }
-
             data_path = os.path.join(data_dir, task['dataset_uri'])
             with open(data_path) as f:
                 data = [json.loads(line) for line in f]
-
             rng_data = random.Random(1337)
             rng_data.shuffle(data)
+            task_data[label] = data
+            task_cursors[label] = 0
 
-            remaining = n - examples_done
-            task_n = min(remaining, len(data))
+        examples_done = 0
+        while examples_done < n:
+            made_progress = False
+            for task in type_tasks:
+                if examples_done >= n:
+                    break
 
-            if label not in task_results:
-                task_results[label] = [0, 0]
-
-            for i in range(task_n):
-                try:
-                    correct, pred, gold = evaluate_example(
-                        model, tokenizer, data[i], data, i, task_meta, device, max_seq_len
-                    )
-                except Exception as e:
-                    print0(f"  [{label}] Example {i}: ERROR - {e}")
+                label = task['label']
+                cursor = task_cursors[label]
+                data = task_data[label]
+                if cursor >= len(data):
                     continue
 
+                task_meta = {
+                    'task_type': task['icl_task_type'],
+                    'num_fewshot': task['num_fewshot'][0],
+                    'continuation_delimiter': task.get('continuation_delimiter', ' ')
+                }
+
+                try:
+                    correct, pred, gold = evaluate_example(
+                        model, tokenizer, data[cursor], data, cursor, task_meta, device, max_seq_len
+                    )
+                except Exception as e:
+                    print0(f"  [{label}] Example {cursor}: ERROR - {e}")
+                    task_cursors[label] = cursor + 1
+                    made_progress = True
+                    continue
+
+                task_cursors[label] = cursor + 1
+                made_progress = True
+
                 mark = "Y" if correct else "N"
+                if label not in task_results:
+                    task_results[label] = [0, 0]
                 task_results[label][0] += int(correct)
                 task_results[label][1] += 1
                 examples_done += 1
@@ -493,8 +507,8 @@ def run_core_eval(model, tokenizer, device, num_examples=27):
                 gold_short = gold[:80].replace('\n', ' ')
                 print0(f"  [{mark}] {label}: pred={pred_short!r}  gold={gold_short!r}")
 
-                if examples_done >= n:
-                    break
+            if not made_progress:
+                break
 
     raw_accuracies = {}
     centered_scores = {}

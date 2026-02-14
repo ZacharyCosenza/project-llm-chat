@@ -17,7 +17,7 @@ export NCCL_NET=Socket
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "============================================"
-echo "TinyGPT Training - ${N_GPUS} GPU(s)"
+echo "ZAC-GPT-2 - ${N_GPUS} GPU(s)"
 echo "============================================"
 
-torchrun --standalone --nproc_per_node="$N_GPUS" "${SCRIPT_DIR}/run_7_opt.py"
+torchrun --standalone --nproc_per_node="$N_GPUS" "${SCRIPT_DIR}/run_9_tokens.py" --resume logs/j651hrgg/checkpoints/checkpoint_38200.pt
