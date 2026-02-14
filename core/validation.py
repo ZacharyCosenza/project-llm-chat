@@ -12,6 +12,22 @@ def run_sentence_completion(model, tokenizer, device="cuda", max_new_tokens=50, 
         "The most important thing to remember is",
         "When I was young",
         "The future of technology",
+        "It was a dark and stormy",
+        "Scientists recently discovered that",
+        "The best way to learn is",
+        "She opened the door and",
+        "In the beginning there was",
+        "Every great journey begins with",
+        "The sun set over the",
+        "If I could change one thing",
+        "They say that knowledge is",
+        "Deep in the forest there",
+        "The key to success is",
+        "Long ago in a distant",
+        "Music has the power to",
+        "At the end of the day",
+        "The old man looked at",
+        "Breaking news today as",
     ]
 
     print0("\n" + "="*80)
@@ -32,10 +48,9 @@ def run_sentence_completion(model, tokenizer, device="cuda", max_new_tokens=50, 
                 top_k=top_k
             )
             completion_text = tokenizer.decode(completed[0], skip_special_tokens=True)
+            generated_part = completion_text[len(prompt):]
 
-            print0(f"\n[{i+1}/{len(prompts)}] Prompt: '{prompt}'")
-            print0(f"Completion: {completion_text}")
-            print0("-" * 80)
+            print0(f"  {prompt} | {generated_part}")
 
             completions.append({
                 "prompt": prompt,
@@ -88,6 +103,66 @@ def run_world_knowledge_validation(model, tokenizer, device="cuda", max_new_toke
             "prompt": "Houston, we have a",
             "expected": "Houston, we have a problem",
         },
+        {
+            "prompt": "The largest ocean on Earth is the",
+            "expected": "The largest ocean on Earth is the Pacific Ocean",
+        },
+        {
+            "prompt": "I think, therefore I",
+            "expected": "I think, therefore I am",
+        },
+        {
+            "prompt": "The chemical symbol for water is",
+            "expected": "The chemical symbol for water is H2O",
+        },
+        {
+            "prompt": "One small step for man, one giant leap for",
+            "expected": "One small step for man, one giant leap for mankind",
+        },
+        {
+            "prompt": "The theory of relativity was proposed by",
+            "expected": "The theory of relativity was proposed by Albert Einstein",
+        },
+        {
+            "prompt": "The tallest mountain in the world is",
+            "expected": "The tallest mountain in the world is Mount Everest",
+        },
+        {
+            "prompt": "The human body has 206",
+            "expected": "The human body has 206 bones",
+        },
+        {
+            "prompt": "The Mona Lisa was painted by",
+            "expected": "The Mona Lisa was painted by Leonardo da Vinci",
+        },
+        {
+            "prompt": "The largest planet in our solar system is",
+            "expected": "The largest planet in our solar system is Jupiter",
+        },
+        {
+            "prompt": "Four score and seven years",
+            "expected": "Four score and seven years ago",
+        },
+        {
+            "prompt": "Romeo, Romeo, wherefore art thou",
+            "expected": "Romeo, Romeo, wherefore art thou Romeo",
+        },
+        {
+            "prompt": "The speed of light is approximately",
+            "expected": "The speed of light is approximately 300,000 kilometers per second",
+        },
+        {
+            "prompt": "The Great Wall of China was built to",
+            "expected": "The Great Wall of China was built to protect against invasions",
+        },
+        {
+            "prompt": "Shakespeare was born in",
+            "expected": "Shakespeare was born in Stratford-upon-Avon",
+        },
+        {
+            "prompt": "Ask not what your country can do for you",
+            "expected": "Ask not what your country can do for you ask what you can do for your country",
+        },
     ]
 
     print0("\n" + "="*80)
@@ -118,11 +193,10 @@ def run_world_knowledge_validation(model, tokenizer, device="cuda", max_new_toke
             all_references.append(expected)
             all_prompts.append(prompt)
 
-            print0(f"\n[{i+1}/{len(test_cases)}]")
-            print0(f"Prompt:    '{prompt}'")
-            print0(f"Expected:  '{expected}'")
-            print0(f"Generated: '{prediction}'")
-            print0("-" * 80)
+            generated_part = prediction[len(prompt):]
+            expected_part = expected[len(prompt):]
+            match = "Y" if prediction.strip() == expected.strip() else "N"
+            print0(f"  [{match}] {prompt} | {generated_part}  (expected: {expected_part})")
 
             del encoded, completed
 

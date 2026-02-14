@@ -1,5 +1,4 @@
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
@@ -21,9 +20,8 @@ from core.validation import run_world_knowledge_validation, run_sentence_complet
 import math
 
 class StreamingParquetDataset(IterableDataset):
-    def __init__(self, parquet_dir: str, tokenizer, seq_length: int = 2048,
-                 rank: int = 0, world_size: int = 1, shuffle: bool = False,
-                 max_sequences: int = None):
+    def __init__(self, parquet_dir, tokenizer, seq_length=2048,
+                 rank=0, world_size=1, shuffle=False, max_sequences=None):
         self.files = sorted(Path(parquet_dir).glob("*.parquet"))
         self.tokenizer = tokenizer
         self.seq_length = seq_length
@@ -41,7 +39,6 @@ class StreamingParquetDataset(IterableDataset):
 
         total_shards = self.world_size * num_workers
         shard_id = self.rank * num_workers + worker_id
-        print0(f"Rank {self.rank}, shard_id {shard_id}, total_shards {total_shards}, num_files {len(self.files)}")
 
         files = self.files.copy()
         if self.shuffle:
@@ -81,10 +78,7 @@ def collate_fn(batch):
 def create_dataloaders(train_dir, val_dir, tokenizer, batch_size, seq_length,
                        num_workers, val_sequences, rank, world_size):
     train_dataset = StreamingParquetDataset(
-        train_dir, tokenizer, seq_length,
-        rank=rank,
-        world_size=world_size,
-        shuffle=True
+        train_dir, tokenizer, seq_length, rank=rank, world_size=world_size, shuffle=True
     )
     train_loader = DataLoader(
         train_dataset, batch_size=batch_size, collate_fn=collate_fn,
@@ -92,13 +86,9 @@ def create_dataloaders(train_dir, val_dir, tokenizer, batch_size, seq_length,
         prefetch_factor=2 if num_workers > 0 else None
     )
 
-    per_gpu_sequences = val_sequences // world_size
     val_dataset = StreamingParquetDataset(
-        val_dir, tokenizer, seq_length,
-        rank=rank,
-        world_size=world_size,
-        shuffle=False,
-        max_sequences=per_gpu_sequences
+        val_dir, tokenizer, seq_length, rank=rank, world_size=world_size,
+        shuffle=False, max_sequences=val_sequences // world_size
     )
     val_loader = DataLoader(
         val_dataset, batch_size=batch_size, collate_fn=collate_fn,
@@ -113,16 +103,11 @@ def setup_distributed():
         world_size = int(os.environ['WORLD_SIZE'])
         local_rank = int(os.environ.get('LOCAL_RANK', 0))
     else:
-        rank = 0
-        world_size = 1
-        local_rank = 0
+        rank, world_size, local_rank = 0, 1, 0
 
     if world_size > 1:
         torch.cuda.set_device(local_rank)
-        dist.init_process_group(
-            backend='nccl',
-            device_id=torch.device(f'cuda:{local_rank}')
-        )
+        dist.init_process_group(backend='nccl', device_id=torch.device(f'cuda:{local_rank}'))
 
     return rank, world_size, local_rank
 
@@ -138,38 +123,24 @@ def reduce_tensor(tensor, world_size):
         return rt
     return tensor
 
-
 def save_checkpoint(model, global_step, checkpoint_dir, rank):
-    """Save model weights checkpoint. Only rank 0 saves to avoid conflicts.
-    Removes previous checkpoints to save disk space."""
     if rank != 0:
         return
 
     checkpoint_dir = Path(checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
-
-    # Find existing checkpoints before saving
     old_checkpoints = list(checkpoint_dir.glob("checkpoint_*.pt"))
 
     base_model = model.module if isinstance(model, DDP) else model
-
-    checkpoint = {
-        'model_state_dict': base_model.state_dict(),
-    }
-
     path = checkpoint_dir / f"checkpoint_{global_step}.pt"
-    torch.save(checkpoint, path)
+    torch.save({'model_state_dict': base_model.state_dict()}, path)
     print0(f"Saved checkpoint to {path} (step {global_step})")
 
-    # Remove previous checkpoints
     for old_ckpt in old_checkpoints:
         if old_ckpt != path:
             old_ckpt.unlink()
-            print0(f"Removed old checkpoint: {old_ckpt}")
-
 
 def find_latest_checkpoint(checkpoint_dir):
-    """Find the checkpoint with the highest step number."""
     checkpoint_dir = Path(checkpoint_dir)
     if not checkpoint_dir.exists():
         return None
@@ -187,31 +158,19 @@ def find_latest_checkpoint(checkpoint_dir):
     checkpoints.sort(key=get_step, reverse=True)
     return checkpoints[0]
 
-
 def load_checkpoint(checkpoint_path, model, scheduler, device):
-    """Load model weights and infer global step from filename.
-
-    Expects filename format: checkpoint_{step}.pt
-    Scheduler is fast-forwarded to the correct step.
-    """
     print0(f"Loading checkpoint from {checkpoint_path}")
 
-    # Extract step from filename
-    stem = Path(checkpoint_path).stem  # e.g. "checkpoint_500"
-    step_str = stem.split('_')[-1]
-    global_step = int(step_str)
-
+    global_step = int(Path(checkpoint_path).stem.split('_')[-1])
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
     base_model = model.module if isinstance(model, DDP) else model
     base_model.load_state_dict(checkpoint['model_state_dict'])
 
-    # Fast-forward scheduler to the correct step
     for _ in range(global_step):
         scheduler.step()
 
-    print0(f"Resumed from step {global_step} (scheduler fast-forwarded)")
-
+    print0(f"Resumed from step {global_step}")
     return global_step
 
 def train_epoch(model, train_loader, optimizer, scheduler, scaler, device, rank, world_size,
@@ -250,10 +209,7 @@ def train_epoch(model, train_loader, optimizer, scheduler, scaler, device, rank,
 
                 if rank == 0:
                     current_lr = scheduler.get_last_lr()[0]
-                    if global_step < warmup_steps:
-                        phase = 0  # warmup
-                    else:
-                        phase = 1  # cosine decay
+                    phase = 0 if global_step < warmup_steps else 1
 
                     log_dict = {
                         'train/loss': loss_reduced.item(),
@@ -311,20 +267,15 @@ def validate(model, val_loader, device, rank, world_size, global_step, tokenizer
                 logits = model(input_ids)
                 loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
 
-            ppl = torch.exp(loss)
-
             total_loss += loss.item()
-            total_ppl += ppl.item()
+            total_ppl += torch.exp(loss).item()
             num_batches += 1
 
     avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
     avg_ppl = total_ppl / num_batches if num_batches > 0 else 0.0
 
-    avg_loss_tensor = torch.tensor(avg_loss, device=device)
-    avg_ppl_tensor = torch.tensor(avg_ppl, device=device)
-
-    avg_loss_reduced = reduce_tensor(avg_loss_tensor, world_size).item()
-    avg_ppl_reduced = reduce_tensor(avg_ppl_tensor, world_size).item()
+    avg_loss_reduced = reduce_tensor(torch.tensor(avg_loss, device=device), world_size).item()
+    avg_ppl_reduced = reduce_tensor(torch.tensor(avg_ppl, device=device), world_size).item()
 
     if rank == 0:
         log_dict = {
@@ -341,31 +292,16 @@ def validate(model, val_loader, device, rank, world_size, global_step, tokenizer
             })
 
         base_model = model.module if isinstance(model, DDP) else model
-
-        run_world_knowledge_validation(
-            base_model,
-            tokenizer,
-            device=device
-        )
-
-        sentence_completions = run_sentence_completion(
-            base_model,
-            tokenizer,
-            device=device
-        )
+        run_world_knowledge_validation(base_model, tokenizer, device=device)
+        sentence_completions = run_sentence_completion(base_model, tokenizer, device=device)
 
         if use_wandb:
             wandb.log(log_dict)
-
             if sentence_completions:
-                sentence_completion_data = [
-                    [global_step, item['prompt'], item['completion']]
-                    for item in sentence_completions
-                ]
                 wandb.log({
                     "sentence_completions": wandb.Table(
                         columns=["step", "prompt", "completion"],
-                        data=sentence_completion_data
+                        data=[[global_step, item['prompt'], item['completion']] for item in sentence_completions]
                     )
                 })
 
@@ -377,15 +313,11 @@ def validate(model, val_loader, device, rank, world_size, global_step, tokenizer
     return avg_loss_reduced
 
 def create_optimizer_and_scheduler(model, peak_lr, min_lr, weight_decay, warmup_steps, max_steps):
-    """Create AdamW optimizer with proper weight decay exclusion and cosine schedule with warmup."""
-    # Separate parameters: no weight decay for bias and LayerNorm
     no_decay = ["bias", "ln", "layernorm", "layer_norm"]
-
     decay_params = []
     no_decay_params = []
 
     base_model = model.module if isinstance(model, DDP) else model
-
     for name, param in base_model.named_parameters():
         if not param.requires_grad:
             continue
@@ -394,49 +326,29 @@ def create_optimizer_and_scheduler(model, peak_lr, min_lr, weight_decay, warmup_
         else:
             decay_params.append(param)
 
-    param_groups = [
-        {"params": decay_params, "weight_decay": weight_decay},
-        {"params": no_decay_params, "weight_decay": 0.0},
-    ]
-
     optimizer = torch.optim.AdamW(
-        param_groups,
-        lr=peak_lr,
-        betas=(0.9, 0.95),
-        eps=1e-8
+        [{"params": decay_params, "weight_decay": weight_decay},
+         {"params": no_decay_params, "weight_decay": 0.0}],
+        lr=peak_lr, betas=(0.9, 0.95), eps=1e-8
     )
 
-    # Cosine schedule with linear warmup
-    warmup_scheduler = LinearLR(
-        optimizer,
-        start_factor=1e-2,
-        end_factor=1.0,
-        total_iters=warmup_steps
-    )
-    cosine_scheduler = CosineAnnealingLR(
-        optimizer,
-        T_max=max_steps - warmup_steps,
-        eta_min=min_lr
-    )
-    scheduler = SequentialLR(
-        optimizer,
-        schedulers=[warmup_scheduler, cosine_scheduler],
-        milestones=[warmup_steps]
-    )
+    warmup_scheduler = LinearLR(optimizer, start_factor=1e-2, end_factor=1.0, total_iters=warmup_steps)
+    cosine_scheduler = CosineAnnealingLR(optimizer, T_max=max_steps - warmup_steps, eta_min=min_lr)
+    scheduler = SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup_steps])
 
     return optimizer, scheduler
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Train TinyGPT model with GPT-2 standard optimizer')
-    parser.add_argument('--batch_size', type=int, default=22, help='Batch size per GPU')
-    parser.add_argument('--max_steps', type=int, default=10000, help='Maximum training steps')
-    parser.add_argument('--fast_dev_run', type=int, default=0, help='Run a quick test with N batches')
-    parser.add_argument('--resume', type=str, default=None,
-                        help='Path to checkpoint file or run directory to resume from')
-    parser.add_argument('--peak_lr', type=float, default=6e-4, help='Peak learning rate')
-    parser.add_argument('--min_lr', type=float, default=6e-5, help='Minimum learning rate (10x below peak)')
-    parser.add_argument('--weight_decay', type=float, default=0.1, help='Weight decay')
-    parser.add_argument('--warmup_ratio', type=float, default=0.01, help='Warmup ratio (1-2% of total steps)')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--batch_size', type=int, default=22)
+    parser.add_argument('--max_steps', type=int, default=10000)
+    parser.add_argument('--fast_dev_run', type=int, default=0)
+    parser.add_argument('--resume', type=str, default=None)
+    parser.add_argument('--mode', type=str, default='train', choices=['train', 'test'])
+    parser.add_argument('--peak_lr', type=float, default=6e-4)
+    parser.add_argument('--min_lr', type=float, default=6e-5)
+    parser.add_argument('--weight_decay', type=float, default=0.1)
+    parser.add_argument('--warmup_ratio', type=float, default=0.01)
     args = parser.parse_args()
 
     rank, world_size, local_rank = setup_distributed()
@@ -446,7 +358,6 @@ if __name__ == "__main__":
 
     max_steps = args.max_steps
     val_check_interval = 50
-
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
 
     n_layers = 20
@@ -456,132 +367,71 @@ if __name__ == "__main__":
     n_heads = max(1, (dim + 127) // 128)
 
     model = TinyGPT(
-        vocab_size=tokenizer.vocab_size,
-        dim=dim,
-        n_layers=n_layers,
-        n_heads=n_heads,
-        max_seq_len=max_seq_len
+        vocab_size=tokenizer.vocab_size, dim=dim,
+        n_layers=n_layers, n_heads=n_heads, max_seq_len=max_seq_len
     )
 
-    # GPT-2 standard optimizer config
     peak_lr = args.peak_lr
     min_lr = args.min_lr
     weight_decay = args.weight_decay
     warmup_steps = int(args.warmup_ratio * max_steps)
 
-    print0(f"\n=== GPT-2 Standard Optimizer Configuration ===")
-    print0(f"Peak LR: {peak_lr}")
-    print0(f"Min LR: {min_lr}")
-    print0(f"Weight decay: {weight_decay}")
-    print0(f"Betas: (0.9, 0.95)")
-    print0(f"Eps: 1e-8")
+    print0(f"\n=== Optimizer Configuration ===")
+    print0(f"Peak LR: {peak_lr}, Min LR: {min_lr}, Weight decay: {weight_decay}")
     print0(f"Warmup steps: {warmup_steps} ({args.warmup_ratio*100:.1f}% of {max_steps})")
-    print0(f"Cosine decay steps: {max_steps - warmup_steps}")
 
     if torch.cuda.is_available():
         device = torch.device(f'cuda:{local_rank}')
         accelerator = 'gpu'
-        num_gpus = torch.cuda.device_count()
-        if rank == 0:
-            print0(f"Detected {num_gpus} GPU(s): {[torch.cuda.get_device_name(i) for i in range(num_gpus)]}")
     else:
         device = torch.device('cpu')
         accelerator = 'cpu'
-        if rank == 0:
-            print0("No GPU detected, using CPU")
 
     effective_batch_size = batch_size * world_size
     print0(f"\n=== Training Configuration ===")
-    print0(f"World size: {world_size}")
-    print0(f"Batch size per GPU: {batch_size}")
-    print0(f"Effective batch size: {effective_batch_size}")
+    print0(f"World size: {world_size}, Batch size per GPU: {batch_size}, Effective: {effective_batch_size}")
     print0(f"Tokens per step: {effective_batch_size * max_seq_len:,}")
 
-    print0('adding model to device')
     model = model.to(device)
-    print0('model added to device')
 
     if world_size > 1:
         dist.barrier()
-        print(f"[Rank {rank}] Barrier passed, about to broadcast test")
-
-        test_tensor = torch.ones(1, device=device) * rank
-        dist.all_reduce(test_tensor)
-        print(f"[Rank {rank}] all_reduce result: {test_tensor.item()}")
-
-        print(f"[Rank {rank}] About to wrap DDP")
         model = DDP(model, device_ids=[local_rank], output_device=local_rank)
-        print(f"[Rank {rank}] DDP complete")
 
-    # Create optimizer with proper weight decay exclusion
     optimizer, scheduler = create_optimizer_and_scheduler(
         model, peak_lr, min_lr, weight_decay, warmup_steps, max_steps
     )
 
-    # Count parameters in each group
-    base_model = model.module if isinstance(model, DDP) else model
-    decay_count = sum(p.numel() for n, p in base_model.named_parameters()
-                      if not any(nd in n.lower() for nd in ["bias", "ln", "layernorm", "layer_norm"]))
-    no_decay_count = sum(p.numel() for n, p in base_model.named_parameters()
-                         if any(nd in n.lower() for nd in ["bias", "ln", "layernorm", "layer_norm"]))
-    print0(f"Parameters with weight decay: {decay_count:,}")
-    print0(f"Parameters without weight decay: {no_decay_count:,}")
-
     scaler = torch.amp.GradScaler('cuda', enabled=(accelerator == 'gpu'))
 
     train_loader, val_loader = create_dataloaders(
-        'data/base_data',
-        'data/base_data',
-        tokenizer,
-        batch_size,
-        max_seq_len,
-        num_workers=0,
-        val_sequences=1000,
-        rank=rank,
-        world_size=world_size
+        'data/base_data', 'data/base_data', tokenizer, batch_size, max_seq_len,
+        num_workers=0, val_sequences=1000, rank=rank, world_size=world_size
     )
-    print0('loaders created')
 
     use_wandb = rank == 0
     wandb_run_id = None
     run_name = f"{world_size}gpu_bs{effective_batch_size}_gpt2opt"
 
     if use_wandb:
-        print('Initializing wandb with GPT-2 standard config')
         wandb_run_id = wandb.util.generate_id()
         run_dir = logs_dir / wandb_run_id
         run_dir.mkdir(parents=True, exist_ok=True)
 
         wandb.init(
-            project="llm-training",
-            name=run_name,
-            id=wandb_run_id,
-            dir=str(run_dir),
-            resume="allow",
+            project="llm-training", name=run_name, id=wandb_run_id,
+            dir=str(run_dir), resume="allow",
             config={
-                "optimizer": "GPT-2 Standard",
-                "vocab_size": tokenizer.vocab_size,
-                "dim": dim,
-                "n_layers": n_layers,
-                "n_heads": n_heads,
-                "max_seq_len": max_seq_len,
-                "batch_size_per_gpu": batch_size,
-                "num_gpus": world_size,
+                "vocab_size": tokenizer.vocab_size, "dim": dim,
+                "n_layers": n_layers, "n_heads": n_heads, "max_seq_len": max_seq_len,
+                "batch_size_per_gpu": batch_size, "num_gpus": world_size,
                 "effective_batch_size": effective_batch_size,
                 "tokens_per_step": effective_batch_size * max_seq_len,
-                "peak_lr": peak_lr,
-                "min_lr": min_lr,
-                "weight_decay": weight_decay,
-                "betas": "(0.9, 0.95)",
-                "eps": 1e-8,
-                "warmup_steps": warmup_steps,
-                "warmup_ratio": args.warmup_ratio,
-                "max_steps": max_steps,
-                "accelerator": accelerator,
+                "peak_lr": peak_lr, "min_lr": min_lr, "weight_decay": weight_decay,
+                "warmup_steps": warmup_steps, "max_steps": max_steps,
             }
         )
 
-    # Broadcast wandb run ID to all ranks for consistent checkpoint directory
     if world_size > 1:
         if rank == 0:
             run_id_tensor = torch.zeros(64, dtype=torch.uint8, device=device)
@@ -603,20 +453,13 @@ if __name__ == "__main__":
     log_every_n_steps = 1
     limit_val_batches = batch_size
 
-    print0(f"Gradient accumulation steps: {accumulate_grad_batches}")
-    print0(f"Gradient clip: {gradient_clip_val}")
-    print0(f"Checkpoints will be saved to: {checkpoint_dir}")
-
     global_step = 0
 
     if args.resume:
         resume_path = Path(args.resume)
         if resume_path.is_dir():
             ckpt_subdir = resume_path / "checkpoints"
-            if ckpt_subdir.exists():
-                checkpoint_path = find_latest_checkpoint(ckpt_subdir)
-            else:
-                checkpoint_path = find_latest_checkpoint(resume_path)
+            checkpoint_path = find_latest_checkpoint(ckpt_subdir if ckpt_subdir.exists() else resume_path)
         else:
             checkpoint_path = resume_path
 
@@ -625,13 +468,46 @@ if __name__ == "__main__":
         else:
             print0(f"No checkpoint found at {args.resume}, starting from scratch")
 
+    if args.mode == 'test':
+        if global_step == 0:
+            print0("WARNING: No checkpoint loaded. Running test on untrained model.")
+
+        print0(f"\n=== Test Mode (loaded step {global_step}) ===")
+        base_model = model.module if isinstance(model, DDP) else model
+
+        model.eval()
+        total_loss = 0.0
+        num_batches = 0
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(val_loader):
+                if batch_idx >= limit_val_batches:
+                    break
+                input_ids = batch['input_ids'].to(device)
+                labels = batch['labels'].to(device)
+                with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=(device.type == 'cuda')):
+                    logits = model(input_ids)
+                    loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
+                total_loss += loss.item()
+                num_batches += 1
+
+        avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
+        avg_ppl = math.exp(avg_loss) if avg_loss < 20 else float('inf')
+        print0(f"\nTest Perplexity: {avg_ppl:.4f}")
+        print0(f"Test Loss: {avg_loss:.4f}")
+        print0(f"Test Batches: {num_batches}")
+
+        run_sentence_completion(base_model, tokenizer, device=device)
+        run_world_knowledge_validation(base_model, tokenizer, device=device)
+
+        cleanup_distributed()
+        exit(0)
+
     pbar = tqdm(total=max_steps, initial=global_step, disable=(rank != 0), desc="Training")
 
     if args.fast_dev_run > 0:
         max_steps = args.fast_dev_run
 
     while global_step < max_steps:
-        print0('starting training!')
         global_step = train_epoch(
             model, train_loader, optimizer, scheduler, scaler, device, rank, world_size,
             global_step, max_steps, accumulate_grad_batches, gradient_clip_val, log_every_n_steps,

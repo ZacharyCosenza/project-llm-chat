@@ -7,9 +7,8 @@ The major goal of this set of experiments is to learn more about the following (
 
 # TODO
 
-- Gradient accumulation
 - Add CORE eval
-- Understanding number of iterations from FLOPs
+- Start mid training
 
 # Estimation of number of iterations
 
@@ -66,12 +65,23 @@ This would then require ~15,000 iterations. The logical next step is to compare 
 
 # Pre-training
 
-Session 1: I will start pre-training. I first starting running on 2XH100 using batch_size = 22 for ~4k iterations while watching The Brutalist. That gives me 720896000 tokens, so ~9.2B to go (id = qfkhmres)!
+Session 1: I will start pre-training. I first starting running on 2XH100 using batch_size = 22 for ~4k iterations while watching The Brutalist. That gives me 720,896,000 tokens (~720.9M), so ~9.28B to go (id = qfkhmres)!
 
-Session 2: Updated with improved saving. Let's reload the checkpoint and start at iteration 4000. If we use 4XH100. To finish training we'd need only 18k iterations here, but I needed to reduce batch_size = 18, so we're back up to needing 22k iterations. However I only got through ~500 iterations because I'm in a coffee shop with bad internet connection (id = 46acw8eb)
+Session 2: Updated with improved saving. Let's reload the checkpoint and start at iteration 4000. If we use 4XH100. To finish training we'd need only 18k iterations here, but I needed to reduce batch_size = 18, so we're back up to needing 22k iterations. However I only got through ~500 iterations because I'm in a coffee shop with bad internet connection. Trained 147,456,000 tokens (~147.5M), cumulative ~868.4M, ~9.13B to go (id = 46acw8eb)
 
-Session 3: 4500 starting
+Session 3: 4500 starting, 10000 ending, batch_size 18 and 4 GPUs. Trained 1,622,016,000 tokens (~1.62B), cumulative ~2.49B, ~7.51B to go (id = carxia2m)
+
+Session 4: starting 10000, batch_size 18 and 4 GPUs, ended 16500. Trained 1,916,928,000 tokens (~1.92B), cumulative ~4.41B, ~5.59B to go (id = 56c2n5c6)
+
+Session 5: started 16500 ended checkpoint_35800.pt (iteration 35800), batch_size 18 and 4 GPUs (id = iec3w33j). Trained 5,689,344,000 tokens (~5.69B), cumulative ~10.10B, COMPLETED! I was at Trees Bar near Park Slope enjoying Wine Wednesdays after PPTC run club and got to watch my child (who I have named ZAC-GPT) learn how to say full sentences!
+
+Session 6: Okay so I deleted iec3w33j by accident so let's restart at 56c2n5c6, which starts at iteration 16500 with batch_size 18 on 4 GPUs and ended at iteration 38200. Trained 6,394,368,000 tokens (~6.39B), cumulative ~10.80B, COMPLETED for ZAC-GPT-2 (with extra tokens for good measure)!
 
 # Creating a set for validation
+
+HellaSwag k-shot: test for commonsense reasoning with k choices.
+LAMBADA: final word completion, tests for long range reasoning.
+PIQA: test for physical commonsense reasoning with 2 choices.
+ARC Easy / Challenge: easy and harder science multiple choices.
 
 The paradigm here is only having training and validation. We hold out a parquet file for validation. I had been using perplexity but I want to add some additional tests. I have started with a set of sentence completions that will be printed as well as some basic world knowledge compeltion tasks. This required adding a predict function to the model to make autoregressive temperature-normalized predictions until a max token limit. I also have started to add the rest of the ~1k parquet files to my machine which required increasing the storage size. 
