@@ -53,6 +53,7 @@ ipython_config.py
 *.swo
 *~
 .DS_Store
+CLAUDE.md
 
 # Testing
 .pytest_cache/

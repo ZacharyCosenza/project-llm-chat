@@ -1,5 +1,15 @@
+import os
+import csv
+import json
+import random
+import yaml
 import torch
+import torch.nn.functional as F
+from jinja2 import Template
 from core.utils import print0
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+EVAL_DIR = os.path.join(_SCRIPT_DIR, '..', 'data', 'eval_data')
 
 
 def run_sentence_completion(model, tokenizer, device="cuda", max_new_tokens=50, temperature=0.8, top_k=40):
@@ -200,15 +210,12 @@ def run_world_knowledge_validation(model, tokenizer, device="cuda", max_new_toke
 
             del encoded, completed
 
-    # Simple metrics (no external dependencies)
     metrics = {}
 
-    # Exact Match Accuracy
     exact_matches = sum(1 for pred, ref in zip(all_predictions, all_references) if pred.strip() == ref.strip())
     accuracy = exact_matches / len(all_predictions)
     metrics['accuracy'] = float(accuracy)
 
-    # Token-level F1
     total_f1 = 0
     for pred, ref in zip(all_predictions, all_references):
         pred_tokens = set(pred.lower().split())
@@ -242,4 +249,291 @@ def run_world_knowledge_validation(model, tokenizer, device="cuda", max_new_toke
         "references": all_references,
         "prompts": all_prompts,
         "metrics": metrics,
+    }
+
+
+# --- CORE Evaluation (DCLM benchmark) ---
+
+def render_prompts_mc(item, delimiter, fewshot):
+    tpl = Template(
+        "{%- for ex in fewshot -%}{{ ex.query }}{{ d }}{{ ex.choices[ex.gold] }}\n\n"
+        "{% endfor -%}{{ item.query }}{{ d }}{{ choice }}"
+    )
+    return [tpl.render(fewshot=fewshot, d=delimiter, item=item, choice=c) for c in item['choices']]
+
+
+def render_prompts_schema(item, delimiter, fewshot):
+    tpl = Template(
+        "{%- for ex in fewshot -%}{{ ex.context_options[ex.gold] }}{{ d }}{{ ex.continuation }}\n\n"
+        "{% endfor -%}{{ ctx }}{{ d }}{{ item.continuation }}"
+    )
+    return [tpl.render(fewshot=fewshot, d=delimiter, item=item, ctx=co) for co in item['context_options']]
+
+
+def render_prompts_lm(item, delimiter, fewshot):
+    base = Template(
+        "{%- for ex in fewshot -%}{{ ex.context | trim }}{{ d }}{{ ex.continuation }}\n\n"
+        "{% endfor -%}{{ item.context | trim }}{{ d }}"
+    )
+    full = Template(
+        "{%- for ex in fewshot -%}{{ ex.context | trim }}{{ d }}{{ ex.continuation }}\n\n"
+        "{% endfor -%}{{ item.context | trim }}{{ d }}{{ item.continuation }}"
+    )
+    ctx = dict(fewshot=fewshot, d=delimiter, item=item)
+    return [base.render(**ctx).strip(), full.render(**ctx)]
+
+
+def find_common_length(seqs, direction='left'):
+    min_len = min(len(s) for s in seqs)
+    indices = range(min_len) if direction == 'left' else range(-1, -min_len - 1, -1)
+    for i, idx in enumerate(indices):
+        if not all(s[idx] == seqs[0][idx] for s in seqs):
+            return i
+    return min_len
+
+
+def tokenize_prompts(tokenizer, prompts):
+    return [tokenizer.encode(p, add_special_tokens=False) for p in prompts]
+
+
+def batch_mc(tokenizer, prompts):
+    tokens = tokenize_prompts(tokenizer, prompts)
+    prefix_len = find_common_length(tokens, 'left')
+    return tokens, [prefix_len] * len(prompts), [len(t) for t in tokens]
+
+
+def batch_schema(tokenizer, prompts):
+    tokens = tokenize_prompts(tokenizer, prompts)
+    suffix_len = find_common_length(tokens, 'right')
+    ends = [len(t) for t in tokens]
+    return tokens, [e - suffix_len for e in ends], ends
+
+
+def batch_lm(tokenizer, prompts):
+    tokens = tokenize_prompts(tokenizer, prompts)
+    t_without, t_with = tokens
+    assert t_without == t_with[:len(t_without)]
+    return [t_with], [len(t_without)], [len(t_with)]
+
+
+def stack_pad(tokens, pad_id):
+    bsz = len(tokens)
+    seq_len = max(len(t) for t in tokens)
+    ids = torch.full((bsz, seq_len), pad_id, dtype=torch.long)
+    for i, t in enumerate(tokens):
+        ids[i, :len(t)] = torch.tensor(t, dtype=torch.long)
+    return ids
+
+
+@torch.no_grad()
+def forward_get_losses(model, input_ids):
+    logits = model(input_ids)
+    B, T, V = logits.shape
+    targets = torch.roll(input_ids, -1, 1)
+    losses = F.cross_entropy(logits.view(B * T, V), targets.view(B * T), reduction='none').view(B, T)
+    losses[:, -1] = float('nan')
+    preds = logits.argmax(dim=-1)
+    return losses, preds
+
+
+@torch.no_grad()
+def evaluate_example(model, tokenizer, item, data, idx, task_meta, device, max_seq_len):
+    task_type = task_meta['task_type']
+    delimiter = task_meta['continuation_delimiter']
+    num_fewshot = task_meta['num_fewshot']
+
+    fewshot = []
+    if num_fewshot > 0:
+        rng = random.Random(1234 + idx)
+        available = [i for i in range(len(data)) if i != idx]
+        fewshot = [data[i] for i in rng.sample(available, min(num_fewshot, len(available)))]
+
+    if task_type == 'multiple_choice':
+        prompts = render_prompts_mc(item, delimiter, fewshot)
+        tokens, starts, ends = batch_mc(tokenizer, prompts)
+    elif task_type == 'schema':
+        prompts = render_prompts_schema(item, delimiter, fewshot)
+        tokens, starts, ends = batch_schema(tokenizer, prompts)
+    elif task_type == 'language_modeling':
+        prompts = render_prompts_lm(item, delimiter, fewshot)
+        tokens, starts, ends = batch_lm(tokenizer, prompts)
+    else:
+        raise ValueError(f"Unknown task type: {task_type}")
+
+    if max_seq_len:
+        new_tokens, new_starts, new_ends = [], [], []
+        for t, s, e in zip(tokens, starts, ends):
+            if len(t) > max_seq_len:
+                crop = len(t) - max_seq_len
+                new_tokens.append(t[-max_seq_len:])
+                new_starts.append(s - crop)
+                new_ends.append(e - crop)
+            else:
+                new_tokens.append(t)
+                new_starts.append(s)
+                new_ends.append(e)
+        tokens, starts, ends = new_tokens, new_starts, new_ends
+
+    pad_id = tokenizer.eos_token_id
+    input_ids = stack_pad(tokens, pad_id).to(device)
+    losses, preds = forward_get_losses(model, input_ids)
+
+    if task_type == 'language_modeling':
+        si, ei = starts[0], ends[0]
+        predicted = preds[0, si - 1:ei - 1]
+        actual = input_ids[0, si:ei]
+        is_correct = torch.all(predicted == actual).item()
+        pred_text = tokenizer.decode(predicted.tolist())
+        gold_text = tokenizer.decode(actual.tolist())
+    elif task_type in ['multiple_choice', 'schema']:
+        mean_losses = [losses[i, s - 1:e - 1].mean().item() for i, (s, e) in enumerate(zip(starts, ends))]
+        pred_idx = mean_losses.index(min(mean_losses))
+        is_correct = pred_idx == item['gold']
+        if task_type == 'multiple_choice':
+            pred_text = item['choices'][pred_idx]
+            gold_text = item['choices'][item['gold']]
+        else:
+            pred_text = item['context_options'][pred_idx]
+            gold_text = item['context_options'][item['gold']]
+
+    return is_correct, pred_text, gold_text
+
+
+def load_random_baselines(eval_dir):
+    meta_path = os.path.join(eval_dir, "eval_meta_data.csv")
+    baselines = {}
+    with open(meta_path, 'r') as f:
+        for row in csv.DictReader(f):
+            baselines[row['Eval Task']] = float(row['Random baseline'])
+    return baselines
+
+
+def run_core_eval(model, tokenizer, device, num_examples=27):
+    eval_dir = os.path.abspath(EVAL_DIR)
+    if not os.path.exists(eval_dir):
+        print0("CORE eval data not found. Run: python -m core.dataset --eval")
+        return None
+
+    config_path = os.path.join(eval_dir, "core.yaml")
+    data_dir = os.path.join(eval_dir, "eval_data")
+
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+
+    random_baselines = load_random_baselines(eval_dir)
+
+    tasks_by_type = {}
+    for t in config['icl_tasks']:
+        tasks_by_type.setdefault(t['icl_task_type'], []).append(t)
+
+    per_type = num_examples // 3
+    remainder = num_examples % 3
+    type_order = list(tasks_by_type.keys())
+
+    print0("\n" + "=" * 80)
+    print0("CORE EVALUATION")
+    print0("=" * 80)
+
+    model.eval()
+    max_seq_len = model.pos_emb.num_embeddings
+
+    task_results = {}
+
+    for type_idx, task_type in enumerate(type_order):
+        n = per_type + (1 if type_idx < remainder else 0)
+        if n == 0:
+            continue
+
+        type_tasks = tasks_by_type[task_type]
+        rng = random.Random(42)
+        rng.shuffle(type_tasks)
+
+        print0(f"\n--- {task_type} ({n} examples) ---")
+
+        examples_done = 0
+        for task in type_tasks:
+            if examples_done >= n:
+                break
+
+            label = task['label']
+            task_meta = {
+                'task_type': task['icl_task_type'],
+                'num_fewshot': task['num_fewshot'][0],
+                'continuation_delimiter': task.get('continuation_delimiter', ' ')
+            }
+
+            data_path = os.path.join(data_dir, task['dataset_uri'])
+            with open(data_path) as f:
+                data = [json.loads(line) for line in f]
+
+            rng_data = random.Random(1337)
+            rng_data.shuffle(data)
+
+            remaining = n - examples_done
+            task_n = min(remaining, len(data))
+
+            if label not in task_results:
+                task_results[label] = [0, 0]
+
+            for i in range(task_n):
+                try:
+                    correct, pred, gold = evaluate_example(
+                        model, tokenizer, data[i], data, i, task_meta, device, max_seq_len
+                    )
+                except Exception as e:
+                    print0(f"  [{label}] Example {i}: ERROR - {e}")
+                    continue
+
+                mark = "Y" if correct else "N"
+                task_results[label][0] += int(correct)
+                task_results[label][1] += 1
+                examples_done += 1
+
+                pred_short = pred[:80].replace('\n', ' ')
+                gold_short = gold[:80].replace('\n', ' ')
+                print0(f"  [{mark}] {label}: pred={pred_short!r}  gold={gold_short!r}")
+
+                if examples_done >= n:
+                    break
+
+    raw_accuracies = {}
+    centered_scores = {}
+    for label, (correct, total) in task_results.items():
+        acc = correct / total if total > 0 else 0.0
+        raw_accuracies[label] = acc
+
+        baseline = random_baselines.get(label, 0.0)
+        baseline_frac = baseline / 100.0
+        if baseline_frac < 1.0:
+            centered = (acc - baseline_frac) / (1.0 - baseline_frac)
+        else:
+            centered = 0.0
+        centered_scores[label] = centered
+
+    core_metric = sum(centered_scores.values()) / len(centered_scores) if centered_scores else 0.0
+
+    total_correct = sum(c for c, _ in task_results.values())
+    total_evaluated = sum(t for _, t in task_results.values())
+    raw_accuracy = total_correct / total_evaluated if total_evaluated > 0 else 0.0
+
+    print0(f"\n{'Task':<35} {'Acc':>8} {'Baseline':>10} {'Centered':>10}")
+    print0("-" * 65)
+    for label in task_results:
+        acc = raw_accuracies[label]
+        baseline = random_baselines.get(label, 0.0)
+        centered = centered_scores[label]
+        print0(f"  {label:<33} {acc:>8.4f} {baseline:>9.1f}% {centered:>10.4f}")
+
+    print0("-" * 65)
+    print0(f"  Raw Accuracy: {total_correct}/{total_evaluated} = {raw_accuracy:.4f}")
+    print0(f"  CORE Metric (mean centered): {core_metric:.4f}")
+    print0("=" * 80 + "\n")
+
+    return {
+        "correct": total_correct,
+        "total": total_evaluated,
+        "raw_accuracy": raw_accuracy,
+        "core_metric": core_metric,
+        "per_task_accuracy": raw_accuracies,
+        "per_task_centered": centered_scores,
     }

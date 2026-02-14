@@ -16,7 +16,7 @@ import pyarrow.parquet as pq
 import os
 import wandb
 from tqdm import tqdm
-from core.validation import run_world_knowledge_validation, run_sentence_completion
+from core.validation import run_world_knowledge_validation, run_sentence_completion, run_core_eval
 import math
 
 class StreamingParquetDataset(IterableDataset):
@@ -181,7 +181,7 @@ def load_checkpoint(checkpoint_path, model, scheduler, device):
 def train_epoch(model, train_loader, optimizer, scheduler, scaler, device, rank, world_size,
                 global_step, max_steps, accumulate_grad_batches, gradient_clip_val, log_every_n_steps,
                 use_wandb, pbar, val_check_interval, val_loader, tokenizer, limit_val_batches,
-                warmup_steps, checkpoint_dir=None):
+                warmup_steps, checkpoint_dir=None, core_examples=27):
     model.train()
     optimizer.zero_grad()
 
@@ -240,7 +240,7 @@ def train_epoch(model, train_loader, optimizer, scheduler, scaler, device, rank,
 
             if global_step % val_check_interval == 0:
                 validate(model, val_loader, device, rank, world_size, global_step,
-                        tokenizer, use_wandb, limit_val_batches)
+                        tokenizer, use_wandb, limit_val_batches, core_examples)
                 model.train()
 
                 if checkpoint_dir:
@@ -254,10 +254,9 @@ def train_epoch(model, train_loader, optimizer, scheduler, scaler, device, rank,
     return global_step
 
 def validate(model, val_loader, device, rank, world_size, global_step, tokenizer,
-             use_wandb, limit_val_batches):
+             use_wandb, limit_val_batches, core_examples=27):
     model.eval()
     total_loss = 0.0
-    total_ppl = 0.0
     num_batches = 0
 
     with torch.no_grad():
@@ -273,11 +272,10 @@ def validate(model, val_loader, device, rank, world_size, global_step, tokenizer
                 loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
 
             total_loss += loss.item()
-            total_ppl += torch.exp(loss).item()
             num_batches += 1
 
     avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
-    avg_ppl = total_ppl / num_batches if num_batches > 0 else 0.0
+    avg_ppl = math.exp(avg_loss) if avg_loss < 20 else float('inf')
 
     avg_loss_reduced = reduce_tensor(torch.tensor(avg_loss, device=device), world_size).item()
     avg_ppl_reduced = reduce_tensor(torch.tensor(avg_ppl, device=device), world_size).item()
@@ -299,6 +297,13 @@ def validate(model, val_loader, device, rank, world_size, global_step, tokenizer
         base_model = model.module if isinstance(model, DDP) else model
         run_world_knowledge_validation(base_model, tokenizer, device=device)
         sentence_completions = run_sentence_completion(base_model, tokenizer, device=device)
+        core_results = run_core_eval(base_model, tokenizer, device=device, num_examples=core_examples)
+
+        if core_results:
+            log_dict['core/metric'] = core_results['core_metric']
+            log_dict['core/raw_accuracy'] = core_results['raw_accuracy']
+            for label, centered in core_results['per_task_centered'].items():
+                log_dict[f'core_tasks/{label}'] = centered
 
         if use_wandb:
             wandb.log(log_dict)
@@ -354,6 +359,7 @@ if __name__ == "__main__":
     parser.add_argument('--min_lr', type=float, default=6e-5)
     parser.add_argument('--weight_decay', type=float, default=0.1)
     parser.add_argument('--warmup_ratio', type=float, default=0.01)
+    parser.add_argument('--core_examples', type=int, default=27)
     args = parser.parse_args()
 
     rank, world_size, local_rank = setup_distributed()
@@ -414,7 +420,7 @@ if __name__ == "__main__":
         num_workers=0, val_sequences=1000, rank=rank, world_size=world_size
     )
 
-    use_wandb = rank == 0
+    use_wandb = rank == 0 and args.mode == 'train'
     wandb_run_id = None
     run_name = f"{world_size}gpu_bs{effective_batch_size}_gpt2opt"
 
@@ -503,21 +509,22 @@ if __name__ == "__main__":
 
         run_sentence_completion(base_model, tokenizer, device=device)
         run_world_knowledge_validation(base_model, tokenizer, device=device)
+        run_core_eval(base_model, tokenizer, device=device, num_examples=args.core_examples)
 
         cleanup_distributed()
         exit(0)
 
-    pbar = tqdm(total=max_steps, initial=global_step, disable=(rank != 0), desc="Training")
-
     if args.fast_dev_run > 0:
-        max_steps = args.fast_dev_run
+        max_steps = global_step + args.fast_dev_run
+
+    pbar = tqdm(total=max_steps, initial=global_step, disable=(rank != 0), desc="Training")
 
     while global_step < max_steps:
         global_step = train_epoch(
             model, train_loader, optimizer, scheduler, scaler, device, rank, world_size,
             global_step, max_steps, accumulate_grad_batches, gradient_clip_val, log_every_n_steps,
             use_wandb, pbar, val_check_interval, val_loader, tokenizer, limit_val_batches,
-            warmup_steps, checkpoint_dir=checkpoint_dir
+            warmup_steps, checkpoint_dir=checkpoint_dir, core_examples=args.core_examples
         )
 
     pbar.close()

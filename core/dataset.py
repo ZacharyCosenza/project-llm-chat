@@ -83,18 +83,73 @@ def download_single_file(index):
     print(f"✗ shard_{index:05d} failed after 5 attempts")
     return False
 
+EVAL_BUNDLE_URL = "https://karpathy-public.s3.us-west-2.amazonaws.com/eval_bundle.zip"
+EVAL_DIR = os.path.join(_SCRIPT_DIR, '..', 'data', 'eval_data')
+
+def download_eval_bundle():
+    """Download and extract the CORE eval bundle from S3."""
+    eval_dir = os.path.abspath(EVAL_DIR)
+    if os.path.exists(eval_dir):
+        print(f"Eval bundle already exists at {eval_dir}")
+        return True
+
+    import zipfile
+    import tempfile
+    import shutil
+
+    print(f"Downloading eval bundle from {EVAL_BUNDLE_URL}...")
+    for attempt in range(1, 4):
+        try:
+            response = requests.get(EVAL_BUNDLE_URL, stream=True, timeout=60)
+            response.raise_for_status()
+
+            with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as tmp:
+                tmp_path = tmp.name
+                for chunk in response.iter_content(chunk_size=1024*1024):
+                    if chunk:
+                        tmp.write(chunk)
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                with zipfile.ZipFile(tmp_path, 'r') as zf:
+                    zf.extractall(tmpdir)
+                extracted = os.path.join(tmpdir, "eval_bundle")
+                shutil.move(extracted, eval_dir)
+
+            os.unlink(tmp_path)
+            print(f"Eval bundle extracted to {eval_dir}")
+            return True
+
+        except (requests.RequestException, IOError, zipfile.BadZipFile) as e:
+            print(f"Attempt {attempt}/3 failed: {e}")
+            for p in [tmp_path]:
+                if os.path.exists(p):
+                    try: os.remove(p)
+                    except: pass
+            if attempt < 3:
+                wait = 2 ** attempt
+                print(f"Retrying in {wait}s...")
+                time.sleep(wait)
+
+    print("Failed to download eval bundle")
+    return False
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Download FineWeb-Edu shards")
-    parser.add_argument("-n", "--num-files", type=int, default=-1, 
+    parser = argparse.ArgumentParser(description="Download FineWeb-Edu shards and/or eval data")
+    parser.add_argument("-n", "--num-files", type=int, default=-1,
                         help="Number of shards (-1 = all)")
     parser.add_argument("-w", "--num-workers", type=int, default=4,
                         help="Parallel workers")
+    parser.add_argument("--eval", action="store_true",
+                        help="Download CORE eval bundle")
     args = parser.parse_args()
 
-    num = (MAX_SHARD + 1) if args.num_files == -1 else min(args.num_files, MAX_SHARD + 1)
-    print(f"Downloading {num} shards to {DATA_DIR} ({args.num_workers} workers)\n")
-    
-    with Pool(args.num_workers) as pool:
-        results = pool.map(download_single_file, range(num))
-    
-    print(f"\nDone! {sum(results)}/{num} shards downloaded")
+    if args.eval:
+        download_eval_bundle()
+    else:
+        num = (MAX_SHARD + 1) if args.num_files == -1 else min(args.num_files, MAX_SHARD + 1)
+        print(f"Downloading {num} shards to {DATA_DIR} ({args.num_workers} workers)\n")
+
+        with Pool(args.num_workers) as pool:
+            results = pool.map(download_single_file, range(num))
+
+        print(f"\nDone! {sum(results)}/{num} shards downloaded")

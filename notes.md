@@ -75,13 +75,28 @@ Session 4: starting 10000, batch_size 18 and 4 GPUs, ended 16500. Trained 1,916,
 
 Session 5: started 16500 ended checkpoint_35800.pt (iteration 35800), batch_size 18 and 4 GPUs (id = iec3w33j). Trained 5,689,344,000 tokens (~5.69B), cumulative ~10.10B, COMPLETED! I was at Trees Bar near Park Slope enjoying Wine Wednesdays after PPTC run club and got to watch my child (who I have named ZAC-GPT) learn how to say full sentences!
 
-Session 6: Okay so I deleted iec3w33j by accident so let's restart at 56c2n5c6, which starts at iteration 16500 with batch_size 18 on 4 GPUs and ended at iteration 38200. Trained 6,394,368,000 tokens (~6.39B), cumulative ~10.80B, COMPLETED for ZAC-GPT-2 (with extra tokens for good measure)!
+Session 6: Okay so I deleted iec3w33j by accident so let's restart at 56c2n5c6, which starts at iteration 16500 with batch_size 18 on 4 GPUs and ended at iteration 38200 (id = j651hrgg). Trained 6,394,368,000 tokens (~6.39B), cumulative ~10.80B, COMPLETED for ZAC-GPT-2 (with extra tokens for good measure)!
+
+Absolutley facinating observations by the end. The LLM goes from random words (due to random weights), to most common words (often "the") after a few hundred iterations, to slowly being able to form larger sentences (~10000 iterations) and paragraphs (~30000 iterations). I knew that pre-training would be helpful for spelling, grammar, and basic sentence construction, but running a set of world knowledge tasks on them I get these results: 
+
+The tallest mountain in the world is:
+
+Iteration 4000: ...the world’s tallest mountain, the world’s tallest mountain.
+
+Iteration 10000: ...the Sargasso Glacier, which is the highest mountain in the world.
+
+Iteration 38200: ...the Mount Everest. The mountain is a part of Nepal, India, Nepal, Bhutan, Nepal
+
+Indicating that because the pre-training dataset contains a QA and world knowledge in it's distribution, even a simple pre-trained GPT2-style LLM can generate plausable responses without mid-training or fine-tuning. Cool!
 
 # Creating a set for validation
 
-HellaSwag k-shot: test for commonsense reasoning with k choices.
-LAMBADA: final word completion, tests for long range reasoning.
-PIQA: test for physical commonsense reasoning with 2 choices.
-ARC Easy / Challenge: easy and harder science multiple choices.
+The paradigm here is only having training and validation. We hold out a parquet file for validation. I had been using perplexity loss for this, but I want to add some additional tests. I have started with a set of sentence completions that will be printed as well as some basic world knowledge compeltion tasks. This required adding a predict function to the model to make autoregressive temperature-normalized predictions until a max token limit. Eventually Claude Code got good enough models to easily integrate K's CORE evaluation metrics into my setup. Here is how the validation set up works:
 
-The paradigm here is only having training and validation. We hold out a parquet file for validation. I had been using perplexity but I want to add some additional tests. I have started with a set of sentence completions that will be printed as well as some basic world knowledge compeltion tasks. This required adding a predict function to the model to make autoregressive temperature-normalized predictions until a max token limit. I also have started to add the rest of the ~1k parquet files to my machine which required increasing the storage size. 
+(1) Open ended sentence completion (for fun)
+(2) World knowledge (harder but still fun)
+(3) Perplexity (raw score, good for tracking pre-training but not details)
+(4) CORE Metric (K-shots available):
+    - Multiple Choice: context + different answers is tokenized for k answers, the choice with the lowest mean loss (for answer only) is picked, accuracy computed as whether you matched the gold standard. Inductive bias here is ICL of answer space.
+    - Schema: different context + same answer is tokenized, same metric as above, against loss computed as mean for context segment. Inductive bias here is ICL of context space, requireing more world knowledge and reasoning.
+    - Language Modeling: regular continuation with accuracy of argmax token. Inductive bias is strict recall.
