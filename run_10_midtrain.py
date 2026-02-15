@@ -78,12 +78,16 @@ class StreamingParquetDataset(IterableDataset):
         if self.shuffle:
             random.shuffle(files)
 
+        # Compute which files belong to this shard (avoids infinite cycle on empty shards)
+        my_file_indices = [i for i in range(len(files)) if i % total_shards == shard_id]
+        if not my_file_indices:
+            return
+
         buffer = deque()
         sequences_yielded = 0
 
-        for file_idx in cycle(range(len(files))) if self.max_sequences else range(len(files)):
-            if file_idx % total_shards != shard_id:
-                continue
+        file_iter = cycle(my_file_indices) if self.max_sequences else iter(my_file_indices)
+        for file_idx in file_iter:
             filepath = files[file_idx]
             pf = pq.ParquetFile(filepath)
             for rg_idx in range(pf.metadata.num_row_groups):
@@ -158,13 +162,16 @@ class ConversationStreamingDataset(IterableDataset):
         if self.shuffle:
             random.shuffle(files)
 
+        # Compute which files belong to this shard (avoids infinite cycle on empty shards)
+        my_file_indices = [i for i in range(len(files)) if i % total_shards == shard_id]
+        if not my_file_indices:
+            return
+
         sequences_yielded = 0
         target_len = self.seq_length + 1  # +1 for input/label shift
 
-        for file_idx in cycle(range(len(files))) if self.max_sequences else range(len(files)):
-            if file_idx % total_shards != shard_id:
-                continue
-
+        file_iter = cycle(my_file_indices) if self.max_sequences else iter(my_file_indices)
+        for file_idx in file_iter:
             filepath = files[file_idx]
             pf = pq.ParquetFile(filepath)
 
