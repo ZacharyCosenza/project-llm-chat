@@ -651,7 +651,7 @@ def create_optimizer_and_scheduler(model, peak_lr, min_lr, weight_decay, warmup_
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch_size', type=int, default=22)
-    parser.add_argument('--max_steps', type=int, default=10000)
+    parser.add_argument('--max_steps', type=int, default=60000)
     parser.add_argument('--fast_dev_run', type=int, default=0)
     parser.add_argument('--resume', type=str, default=None)
     parser.add_argument('--mode', type=str, default='pretrain', choices=['test', 'pretrain', 'midtrain'])
