@@ -420,7 +420,8 @@ def find_latest_checkpoint(checkpoint_dir):
     checkpoints.sort(key=get_step, reverse=True)
     return checkpoints[0]
 
-def load_checkpoint(checkpoint_path, model, scheduler, device):
+def load_checkpoint(checkpoint_path, model, device):
+    """Load model weights from checkpoint. Returns the global step."""
     print0(f"Loading checkpoint from {checkpoint_path}")
 
     global_step = int(Path(checkpoint_path).stem.split('_')[-1])
@@ -428,9 +429,6 @@ def load_checkpoint(checkpoint_path, model, scheduler, device):
 
     base_model = model.module if isinstance(model, DDP) else model
     base_model.load_state_dict(checkpoint['model_state_dict'])
-
-    for _ in range(global_step):
-        scheduler.step()
 
     print0(f"Resumed from step {global_step}")
     return global_step
@@ -719,6 +717,25 @@ if __name__ == "__main__":
 
     model = model.to(device)
 
+    # Load checkpoint BEFORE DDP wrapping and resize
+    global_step = 0
+    if args.resume:
+        resume_path = Path(args.resume)
+        if resume_path.is_dir():
+            ckpt_subdir = resume_path / "checkpoints"
+            checkpoint_path = find_latest_checkpoint(ckpt_subdir if ckpt_subdir.exists() else resume_path)
+        else:
+            checkpoint_path = resume_path
+
+        if checkpoint_path and checkpoint_path.exists():
+            global_step = load_checkpoint(checkpoint_path, model, device)
+        else:
+            print0(f"No checkpoint found at {args.resume}, starting from scratch")
+
+    # Resize embeddings BEFORE DDP wrapping (avoids stale parameter references)
+    resize_embeddings(model, len(tokenizer))
+    model = model.to(device)
+
     if world_size > 1:
         dist.barrier()
         model = DDP(model, device_ids=[local_rank], output_device=local_rank)
@@ -726,6 +743,12 @@ if __name__ == "__main__":
     optimizer, scheduler = create_optimizer_and_scheduler(
         model, peak_lr, min_lr, weight_decay, warmup_steps, max_steps
     )
+
+    # Fast-forward scheduler to resumed step
+    if global_step > 0:
+        for _ in range(global_step):
+            scheduler.step()
+        print0(f"Scheduler fast-forwarded to step {global_step}")
 
     scaler = torch.amp.GradScaler('cuda', enabled=(accelerator == 'gpu'))
 
@@ -785,24 +808,6 @@ if __name__ == "__main__":
     gradient_clip_val = 1.0
     log_every_n_steps = 1
     limit_val_batches = batch_size
-
-    global_step = 0
-
-    if args.resume:
-        resume_path = Path(args.resume)
-        if resume_path.is_dir():
-            ckpt_subdir = resume_path / "checkpoints"
-            checkpoint_path = find_latest_checkpoint(ckpt_subdir if ckpt_subdir.exists() else resume_path)
-        else:
-            checkpoint_path = resume_path
-
-        if checkpoint_path and checkpoint_path.exists():
-            global_step = load_checkpoint(checkpoint_path, model, scheduler, device)
-        else:
-            print0(f"No checkpoint found at {args.resume}, starting from scratch")
-
-    resize_embeddings(model, len(tokenizer))
-    model = model.to(device)
 
     if not is_training:
         if global_step == 0:
