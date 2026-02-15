@@ -101,19 +101,19 @@ The paradigm here is only having training and validation. We hold out a parquet 
     - Schema: different context + same answer is tokenized, same metric as above, against loss computed as mean for context segment. Inductive bias here is ICL of context space, requireing more world knowledge and reasoning.
     - Language Modeling: regular continuation with accuracy of argmax token. Inductive bias is strict recall.
 
+# Mid-training
+
+With pre-training done let's test out mid-training (I know K ended up removing mid-training but whatever this is fun). The major changes here are (i) introducing special tokens (BOS, roles) and (ii) training on conversational data. I'm going to use 30% FineWebEdu  (same data as pre-training) and 70% mix of SmolTalk (synthetic multi-turn QA in technical domains) and UltaChatGen (synthetic dialogue and currated discussions). Goal is to hit 5B tokens with this distribution so with batch_size 18 and 4XH100 GPUs that's ~20k iterations. 
+
 # Infrastructure and multi-GPU setup
 
 Through trial and error on RunPod/Lambda cloud GPU instances, I arrived at a working multi-GPU configuration captured in startup.sh and run_pytorch.sh. These are worth documenting because they represent hours of debugging hangs and crashes.
-
-## Environment (startup.sh)
 
 The setup targets cloud GPU pods (Ubuntu-based) with CUDA 12.4. Key choices:
 - Python 3.11 in a venv (not system Python) for isolation
 - PyTorch installed from the cu124 wheel index to match the driver
 - hf_transfer installed for faster HuggingFace dataset downloads (the default requests-based download is painfully slow for 170+ parquet shards)
 - tmux for keeping training alive after SSH disconnects (critical for multi-hour sessions on cloud instances)
-
-## NCCL flags (run_pytorch.sh)
 
 The cloud GPU instances I used (RunPod, Lambda) don't have InfiniBand or NVLink between GPUs, so NCCL's default communication strategy fails or hangs. The working set of flags:
 
@@ -124,7 +124,5 @@ The cloud GPU instances I used (RunPod, Lambda) don't have InfiniBand or NVLink 
 - `NCCL_DEBUG=WARN` — Only show warnings, not the firehose of INFO messages. Useful during debugging (can set to INFO or TRACE) but too noisy for normal training.
 
 Together these flags tell NCCL: "don't try anything fancy, just use sockets over loopback." The tradeoff is some communication overhead vs. NVLink/P2P, but for 4-GPU training the bottleneck is compute not communication, so the impact is negligible.
-
-## torchrun
 
 Using `torchrun --standalone` for single-node multi-GPU. The `--standalone` flag handles the rendezvous internally (no need for a separate etcd or c10d store). Each GPU gets its own process with RANK, WORLD_SIZE, and LOCAL_RANK set automatically.

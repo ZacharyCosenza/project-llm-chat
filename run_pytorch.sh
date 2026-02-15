@@ -1,5 +1,4 @@
 #!/bin/bash
-# Run TinyGPT training on N GPUs
 # Usage: ./run_pytorch.sh <N>
 #   N - Number of GPUs (default: 1)
 
@@ -20,4 +19,4 @@ echo "============================================"
 echo "ZAC-GPT-2 - ${N_GPUS} GPU(s)"
 echo "============================================"
 
-torchrun --standalone --nproc_per_node="$N_GPUS" "${SCRIPT_DIR}/run_9_tokens.py" --resume logs/j651hrgg/checkpoints/checkpoint_38200.pt
+torchrun --standalone --nproc_per_node="$N_GPUS" "${SCRIPT_DIR}/run_10_midtrain.py" --resume logs/j651hrgg/checkpoints/checkpoint_38200.pt --mode midtrain --batch_size 18

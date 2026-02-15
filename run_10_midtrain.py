@@ -655,13 +655,8 @@ if __name__ == "__main__":
     parser.add_argument('--fast_dev_run', type=int, default=0)
     parser.add_argument('--resume', type=str, default=None)
     parser.add_argument('--mode', type=str, default='pretrain', choices=['test', 'pretrain', 'midtrain'])
-    parser.add_argument('--core_examples', type=int, default=27)
-    parser.add_argument('--use_special_tokens', action='store_true')
+    parser.add_argument('--core_examples', type=int, default=200)
     args = parser.parse_args()
-
-    # Validate mode requirements
-    if args.mode == 'midtrain' and not args.use_special_tokens:
-        raise ValueError("--mode midtrain requires --use_special_tokens")
 
     is_training = args.mode in ('pretrain', 'midtrain')
     mode_train = args.mode if is_training else 'pretrain'  # test mode uses pretrain config for data
@@ -678,19 +673,18 @@ if __name__ == "__main__":
     logs_dir.mkdir(exist_ok=True)
 
     max_steps = args.max_steps
-    val_check_interval = 50
+    val_check_interval = 200
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
 
-    if args.use_special_tokens:
-        special_tokens = {
-            'bos_token': '<|beginoftext|>',
-            'pad_token': '<|pad|>',
-            'additional_special_tokens': ['<|user|>', '<|assistant|>', '<|system|>']
-        }
-        tokenizer.add_special_tokens(special_tokens)
-        print0(f"Added special tokens: vocab {50257} -> {len(tokenizer)}")
-        print0(f"  bos={tokenizer.bos_token_id}, pad={tokenizer.pad_token_id}, "
-               f"eos={tokenizer.eos_token_id}")
+    special_tokens = {
+        'bos_token': '<|beginoftext|>',
+        'pad_token': '<|pad|>',
+        'additional_special_tokens': ['<|user|>', '<|assistant|>', '<|system|>']
+    }
+    tokenizer.add_special_tokens(special_tokens)
+    print0(f"Added special tokens: vocab {50257} -> {len(tokenizer)}")
+    print0(f"  bos={tokenizer.bos_token_id}, pad={tokenizer.pad_token_id}, "
+           f"eos={tokenizer.eos_token_id}")
 
     n_layers = 20
     max_seq_len = 2048
@@ -721,7 +715,7 @@ if __name__ == "__main__":
     effective_batch_size = batch_size * world_size
     print0(f"World size: {world_size}, Batch size per GPU: {batch_size}, Effective: {effective_batch_size}")
     print0(f"Tokens per step: {effective_batch_size * max_seq_len:,}")
-    print0(f"Special tokens: {'ON' if args.use_special_tokens else 'OFF'}")
+    print0(f"Special tokens: ON (vocab={len(tokenizer)})")
 
     model = model.to(device)
 
@@ -735,8 +729,8 @@ if __name__ == "__main__":
 
     scaler = torch.amp.GradScaler('cuda', enabled=(accelerator == 'gpu'))
 
-    bos_token_id = tokenizer.bos_token_id if args.use_special_tokens else None
-    pad_token_id = tokenizer.pad_token_id if args.use_special_tokens else None
+    bos_token_id = tokenizer.bos_token_id
+    pad_token_id = tokenizer.pad_token_id
 
     train_loader, val_loaders = create_dataloaders(
         mode_train, tokenizer, batch_size, max_seq_len,
@@ -765,7 +759,7 @@ if __name__ == "__main__":
                 "tokens_per_step": effective_batch_size * max_seq_len,
                 "peak_lr": peak_lr, "min_lr": min_lr, "weight_decay": weight_decay,
                 "warmup_steps": warmup_steps, "max_steps": max_steps,
-                "use_special_tokens": args.use_special_tokens,
+                "use_special_tokens": True,
                 "dataset_mix": train_config['datasets'],
                 "loss_fn": train_config['loss_fn'],
             }
@@ -807,9 +801,8 @@ if __name__ == "__main__":
         else:
             print0(f"No checkpoint found at {args.resume}, starting from scratch")
 
-    if args.use_special_tokens:
-        resize_embeddings(model, len(tokenizer))
-        model = model.to(device)
+    resize_embeddings(model, len(tokenizer))
+    model = model.to(device)
 
     if not is_training:
         if global_step == 0:
