@@ -1,5 +1,5 @@
 """
-Utilities for FineWeb-Edu dataset: iterate parquet files, download on demand.
+Utilities for dataset download: FineWeb-Edu (pretraining), SmolTalk+UltraChat (midtraining), eval bundle.
 See `repackage_data_reference.py` for dataset preparation details.
 """
 
@@ -83,6 +83,62 @@ def download_single_file(index):
     print(f"✗ shard_{index:05d} failed after 5 attempts")
     return False
 
+CONVERSATION_DATA_DIR = os.path.join(_SCRIPT_DIR, '..', 'data', 'conversation_data')
+SHARD_SIZE = 50_000  # rows per parquet shard
+
+def download_conversation_data():
+    """Download SmolTalk + UltraChat 200k and save as parquet shards.
+
+    Both datasets use the same schema: messages column with [{content, role}] dicts.
+    Combined ~1.5M conversations for midtraining.
+    """
+    from datasets import load_dataset, concatenate_datasets
+    import pyarrow as pa
+
+    conv_dir = os.path.abspath(CONVERSATION_DATA_DIR)
+    if os.path.exists(conv_dir) and any(f.endswith('.parquet') for f in os.listdir(conv_dir)):
+        existing = [f for f in os.listdir(conv_dir) if f.endswith('.parquet')]
+        print(f"Conversation data already exists at {conv_dir} ({len(existing)} shards)")
+        return True
+
+    os.makedirs(conv_dir, exist_ok=True)
+
+    print("Downloading SmolTalk (all, train split)...")
+    smoltalk = load_dataset("HuggingFaceTB/smoltalk", "all", split="train")
+    print(f"  SmolTalk: {len(smoltalk)} conversations")
+
+    print("Downloading UltraChat 200k (train_sft + train_gen)...")
+    ultrachat_sft = load_dataset("HuggingFaceH4/ultrachat_200k", split="train_sft")
+    ultrachat_gen = load_dataset("HuggingFaceH4/ultrachat_200k", split="train_gen")
+    print(f"  UltraChat: {len(ultrachat_sft)} (sft) + {len(ultrachat_gen)} (gen)")
+
+    # Normalize: keep only 'messages' column + add 'source' for traceability
+    def normalize_dataset(ds, source_name):
+        ds = ds.map(lambda x: {"source": source_name}, num_proc=4)
+        return ds.select_columns(["messages", "source"])
+
+    smoltalk = normalize_dataset(smoltalk, "smoltalk")
+    ultrachat_sft = normalize_dataset(ultrachat_sft, "ultrachat_sft")
+    ultrachat_gen = normalize_dataset(ultrachat_gen, "ultrachat_gen")
+
+    combined = concatenate_datasets([smoltalk, ultrachat_sft, ultrachat_gen])
+    combined = combined.shuffle(seed=42)
+    print(f"Combined: {len(combined)} conversations")
+
+    # Save as parquet shards
+    num_shards = (len(combined) + SHARD_SIZE - 1) // SHARD_SIZE
+    for i in range(num_shards):
+        start = i * SHARD_SIZE
+        end = min(start + SHARD_SIZE, len(combined))
+        shard = combined.select(range(start, end))
+        shard_path = os.path.join(conv_dir, f"shard_{i:05d}.parquet")
+        shard.to_parquet(shard_path)
+        print(f"  Saved shard_{i:05d}.parquet ({end - start} rows)")
+
+    print(f"\nDone! {num_shards} shards saved to {conv_dir}")
+    return True
+
+
 EVAL_BUNDLE_URL = "https://karpathy-public.s3.us-west-2.amazonaws.com/eval_bundle.zip"
 EVAL_DIR = os.path.join(_SCRIPT_DIR, '..', 'data', 'eval_data')
 
@@ -141,9 +197,13 @@ if __name__ == "__main__":
                         help="Parallel workers")
     parser.add_argument("--eval", action="store_true",
                         help="Download CORE eval bundle")
+    parser.add_argument("--conversation", action="store_true",
+                        help="Download SmolTalk + UltraChat conversation data for midtraining")
     args = parser.parse_args()
 
-    if args.eval:
+    if args.conversation:
+        download_conversation_data()
+    elif args.eval:
         download_eval_bundle()
     else:
         num = (MAX_SHARD + 1) if args.num_files == -1 else min(args.num_files, MAX_SHARD + 1)
