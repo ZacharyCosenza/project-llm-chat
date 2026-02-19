@@ -50,11 +50,19 @@ TRAIN_CONFIGS = {
 
 # ---- Datasets ----
 
-class StreamingParquetDataset(IterableDataset):
-    """Streams FineWeb-Edu parquet files, packing text into fixed-length chunks."""
+class PackedStreamingDataset(IterableDataset):
+    """Streams parquet files, tokenizes content, and packs into fixed-length chunks.
+
+    Supports two data formats:
+    - 'text': Raw text column (FineWeb-Edu). Tokenizes text, appends EOS.
+    - 'conversation': Messages column with source. Formats as [BOS, role, content..., EOS].
+      Optionally filters by source field.
+
+    All formats pack into a continuous buffer and chunk at seq_length+1.
+    """
     def __init__(self, files, tokenizer, seq_length=2048,
                  rank=0, world_size=1, shuffle=False, max_sequences=None,
-                 bos_token_id=None):
+                 data_format='text', source_filter=None):
         self.files = list(files)
         self.tokenizer = tokenizer
         self.seq_length = seq_length
@@ -62,7 +70,58 @@ class StreamingParquetDataset(IterableDataset):
         self.world_size = world_size
         self.shuffle = shuffle
         self.max_sequences = max_sequences
-        self.bos_token_id = bos_token_id
+        self.data_format = data_format
+        self.source_filter = source_filter
+
+        # Cache special token IDs
+        self.bos_token_id = tokenizer.bos_token_id
+        self.eos_token_id = tokenizer.eos_token_id
+        if data_format == 'conversation':
+            self.role_ids = {
+                'user': tokenizer.convert_tokens_to_ids('<|user|>'),
+                'assistant': tokenizer.convert_tokens_to_ids('<|assistant|>'),
+                'system': tokenizer.convert_tokens_to_ids('<|system|>'),
+            }
+
+    def _tokenize_text(self, text):
+        """Tokenize raw text, append EOS."""
+        tokens = self.tokenizer.encode(text, add_special_tokens=False)
+        tokens.append(self.eos_token_id)
+        return tokens
+
+    def _tokenize_conversation(self, messages):
+        """Format conversation as [BOS, role, content..., role, content..., EOS]."""
+        tokens = [self.bos_token_id]
+        for msg in messages:
+            role_id = self.role_ids.get(msg['role'])
+            if role_id is not None:
+                tokens.append(role_id)
+            tokens.extend(self.tokenizer.encode(msg['content'], add_special_tokens=False))
+        tokens.append(self.eos_token_id)
+        return tokens
+
+    def _iter_tokens_from_file(self, filepath):
+        """Yield token lists from a single parquet file."""
+        pf = pq.ParquetFile(filepath)
+
+        if self.data_format == 'text':
+            for rg_idx in range(pf.metadata.num_row_groups):
+                table = pf.read_row_group(rg_idx, columns=['text'])
+                for text in table['text'].to_pylist():
+                    yield self._tokenize_text(text)
+
+        elif self.data_format == 'conversation':
+            for rg_idx in range(pf.metadata.num_row_groups):
+                table = pf.read_row_group(rg_idx, columns=['messages', 'source'])
+                messages_col = table['messages'].to_pylist()
+                source_col = table['source'].to_pylist()
+
+                for messages, source in zip(messages_col, source_col):
+                    if self.source_filter is not None and source != self.source_filter:
+                        continue
+                    if not messages:
+                        continue
+                    yield self._tokenize_conversation(messages)
 
     def __iter__(self):
         worker_info = torch.utils.data.get_worker_info()
@@ -88,118 +147,14 @@ class StreamingParquetDataset(IterableDataset):
 
         file_iter = cycle(my_file_indices) if self.max_sequences else iter(my_file_indices)
         for file_idx in file_iter:
-            filepath = files[file_idx]
-            pf = pq.ParquetFile(filepath)
-            for rg_idx in range(pf.metadata.num_row_groups):
-                table = pf.read_row_group(rg_idx, columns=['text'])
-                for text in table['text'].to_pylist():
-                    tokens = self.tokenizer.encode(text, add_special_tokens=False)
-                    buffer.extend(tokens)
-                    buffer.append(self.tokenizer.eos_token_id)
+            for tokens in self._iter_tokens_from_file(files[file_idx]):
+                buffer.extend(tokens)
 
-                    while len(buffer) >= self.seq_length + 1:
-                        chunk = [buffer.popleft() for _ in range(self.seq_length + 1)]
-                        if self.bos_token_id is not None:
-                            chunk = [self.bos_token_id] + chunk[:-1]
-                        yield {
-                            'input_ids': torch.tensor(chunk[:-1], dtype=torch.long),
-                            'labels': torch.tensor(chunk[1:], dtype=torch.long)
-                        }
-                        sequences_yielded += 1
-                        if self.max_sequences and sequences_yielded >= self.max_sequences:
-                            return
-
-
-class ConversationStreamingDataset(IterableDataset):
-    """Streams conversation parquets, formatting each conversation with special tokens
-    and padding to seq_length (no cross-conversation packing)."""
-    def __init__(self, files, tokenizer, seq_length=2048,
-                 rank=0, world_size=1, shuffle=False, max_sequences=None,
-                 source_filter=None, pad_token_id=None):
-        self.files = list(files)
-        self.tokenizer = tokenizer
-        self.seq_length = seq_length
-        self.rank = rank
-        self.world_size = world_size
-        self.shuffle = shuffle
-        self.max_sequences = max_sequences
-        self.source_filter = source_filter
-        self.pad_token_id = pad_token_id
-
-        # Cache special token IDs
-        self.bos_token_id = tokenizer.bos_token_id
-        self.eos_token_id = tokenizer.eos_token_id
-        self.role_ids = {
-            'user': tokenizer.convert_tokens_to_ids('<|user|>'),
-            'assistant': tokenizer.convert_tokens_to_ids('<|assistant|>'),
-            'system': tokenizer.convert_tokens_to_ids('<|system|>'),
-        }
-
-    def _format_conversation(self, messages):
-        """Convert messages list to token IDs with special tokens.
-        Returns: [BOS, role, content..., role, content..., EOS]"""
-        tokens = [self.bos_token_id]
-        for msg in messages:
-            role_id = self.role_ids.get(msg['role'])
-            if role_id is not None:
-                tokens.append(role_id)
-            content_tokens = self.tokenizer.encode(msg['content'], add_special_tokens=False)
-            tokens.extend(content_tokens)
-        tokens.append(self.eos_token_id)
-        return tokens
-
-    def __iter__(self):
-        worker_info = torch.utils.data.get_worker_info()
-        if worker_info is None:
-            num_workers, worker_id = 1, 0
-        else:
-            num_workers, worker_id = worker_info.num_workers, worker_info.id
-
-        total_shards = self.world_size * num_workers
-        shard_id = self.rank * num_workers + worker_id
-
-        files = self.files.copy()
-        if self.shuffle:
-            random.shuffle(files)
-
-        # Compute which files belong to this shard (avoids infinite cycle on empty shards)
-        my_file_indices = [i for i in range(len(files)) if i % total_shards == shard_id]
-        if not my_file_indices:
-            return
-
-        sequences_yielded = 0
-        target_len = self.seq_length + 1  # +1 for input/label shift
-
-        file_iter = cycle(my_file_indices) if self.max_sequences else iter(my_file_indices)
-        for file_idx in file_iter:
-            filepath = files[file_idx]
-            pf = pq.ParquetFile(filepath)
-
-            for rg_idx in range(pf.metadata.num_row_groups):
-                table = pf.read_row_group(rg_idx, columns=['messages', 'source'])
-                messages_col = table['messages'].to_pylist()
-                source_col = table['source'].to_pylist()
-
-                for messages, source in zip(messages_col, source_col):
-                    # Filter by source if specified
-                    if self.source_filter is not None and source != self.source_filter:
-                        continue
-
-                    # Skip empty conversations
-                    if not messages:
-                        continue
-
-                    tokens = self._format_conversation(messages)
-
-                    # Truncate or pad to target_len
-                    if len(tokens) > target_len:
-                        tokens = tokens[:target_len]
-                    else:
-                        tokens = tokens + [self.pad_token_id] * (target_len - len(tokens))
-
+                while len(buffer) >= self.seq_length + 1:
+                    chunk = [buffer.popleft() for _ in range(self.seq_length + 1)]
                     yield {
-                        'input_ids': torch.tensor(tokens[:-1], dtype=torch.long),
-                        'labels': torch.tensor(tokens[1:], dtype=torch.long)
+                        'input_ids': torch.tensor(chunk[:-1], dtype=torch.long),
+                        'labels': torch.tensor(chunk[1:], dtype=torch.long)
                     }
                     sequences_yielded += 1
                     if self.max_sequences and sequences_yielded >= self.max_sequences:
@@ -246,8 +201,7 @@ def collate_fn(batch):
 # ---- Dataloaders ----
 
 def create_dataloaders(mode_train, tokenizer, batch_size, seq_length,
-                       num_workers, val_sequences, rank, world_size,
-                       bos_token_id=None, pad_token_id=None):
+                       num_workers, val_sequences, rank, world_size):
     """Create train loader and per-dataset val loaders based on mode_train.
 
     Returns:
@@ -268,9 +222,9 @@ def create_dataloaders(mode_train, tokenizer, batch_size, seq_length,
     if mode_train == 'pretrain':
         print0(f"Data: {len(fineweb_train_files)} FineWeb train shards, {len(fineweb_val_files)} val shards")
 
-        train_dataset = StreamingParquetDataset(
+        train_dataset = PackedStreamingDataset(
             fineweb_train_files, tokenizer, seq_length, rank=rank, world_size=world_size,
-            shuffle=True, bos_token_id=bos_token_id
+            shuffle=True, data_format='text'
         )
         train_loader = DataLoader(
             train_dataset, batch_size=batch_size, collate_fn=collate_fn,
@@ -278,10 +232,10 @@ def create_dataloaders(mode_train, tokenizer, batch_size, seq_length,
             prefetch_factor=2 if num_workers > 0 else None
         )
 
-        # Single val loader
-        fineweb_val = StreamingParquetDataset(
-            fineweb_val_files, tokenizer, seq_length, rank=rank, world_size=world_size,
-            shuffle=False, max_sequences=val_sequences // world_size, bos_token_id=bos_token_id
+        # Single val loader (no DDP sharding — all ranks read same data for correct reduce_tensor)
+        fineweb_val = PackedStreamingDataset(
+            fineweb_val_files, tokenizer, seq_length, rank=0, world_size=1,
+            shuffle=False, max_sequences=val_sequences, data_format='text'
         )
         val_loaders['fineweb'] = DataLoader(
             fineweb_val, batch_size=batch_size, collate_fn=collate_fn,
@@ -297,22 +251,22 @@ def create_dataloaders(mode_train, tokenizer, batch_size, seq_length,
         print0(f"Data: {len(fineweb_train_files)} FineWeb + {len(conv_train_files)} conversation train shards")
         print0(f"  Mix: {' | '.join(f'{k}={v:.1%}' for k, v in dataset_config.items())}")
 
-        # Training: 4 sub-datasets mixed
-        fineweb_train = StreamingParquetDataset(
+        # Training: 4 sub-datasets mixed (all packed)
+        fineweb_train = PackedStreamingDataset(
             fineweb_train_files, tokenizer, seq_length, rank=rank, world_size=world_size,
-            shuffle=True, bos_token_id=bos_token_id
+            shuffle=True, data_format='text'
         )
-        smoltalk_train = ConversationStreamingDataset(
+        smoltalk_train = PackedStreamingDataset(
             conv_train_files, tokenizer, seq_length, rank=rank, world_size=world_size,
-            shuffle=True, source_filter='smoltalk', pad_token_id=pad_token_id
+            shuffle=True, data_format='conversation', source_filter='smoltalk'
         )
-        ultrachat_gen_train = ConversationStreamingDataset(
+        ultrachat_gen_train = PackedStreamingDataset(
             conv_train_files, tokenizer, seq_length, rank=rank, world_size=world_size,
-            shuffle=True, source_filter='ultrachat_gen', pad_token_id=pad_token_id
+            shuffle=True, data_format='conversation', source_filter='ultrachat_gen'
         )
-        ultrachat_sft_train = ConversationStreamingDataset(
+        ultrachat_sft_train = PackedStreamingDataset(
             conv_train_files, tokenizer, seq_length, rank=rank, world_size=world_size,
-            shuffle=True, source_filter='ultrachat_sft', pad_token_id=pad_token_id
+            shuffle=True, data_format='conversation', source_filter='ultrachat_sft'
         )
 
         datasets_with_names = [
@@ -332,26 +286,24 @@ def create_dataloaders(mode_train, tokenizer, batch_size, seq_length,
             prefetch_factor=2 if num_workers > 0 else None
         )
 
-        # Per-dataset val loaders
+        # Per-dataset val loaders (no DDP sharding, all packed)
         num_val_datasets = len(dataset_config)
-        val_seqs_per_dataset = val_sequences // world_size // num_val_datasets
+        val_seqs_per_dataset = val_sequences // num_val_datasets
 
-        # FineWeb val (packed)
-        fineweb_val = StreamingParquetDataset(
-            fineweb_val_files, tokenizer, seq_length, rank=rank, world_size=world_size,
-            shuffle=False, max_sequences=val_seqs_per_dataset, bos_token_id=bos_token_id
+        fineweb_val = PackedStreamingDataset(
+            fineweb_val_files, tokenizer, seq_length, rank=0, world_size=1,
+            shuffle=False, max_sequences=val_seqs_per_dataset, data_format='text'
         )
         val_loaders['fineweb'] = DataLoader(
             fineweb_val, batch_size=batch_size, collate_fn=collate_fn,
             num_workers=num_workers, pin_memory=True
         )
 
-        # Conversation val loaders (padded)
         for source in ['smoltalk', 'ultrachat_gen', 'ultrachat_sft']:
-            conv_val = ConversationStreamingDataset(
-                conv_val_files, tokenizer, seq_length, rank=rank, world_size=world_size,
+            conv_val = PackedStreamingDataset(
+                conv_val_files, tokenizer, seq_length, rank=0, world_size=1,
                 shuffle=False, max_sequences=val_seqs_per_dataset,
-                source_filter=source, pad_token_id=pad_token_id
+                data_format='conversation', source_filter=source
             )
             val_loaders[source] = DataLoader(
                 conv_val, batch_size=batch_size, collate_fn=collate_fn,
@@ -461,12 +413,10 @@ def resize_embeddings(model, new_vocab_size):
 
 # ---- Loss function ----
 
-def compute_loss(logits, labels, mode_train, pad_token_id=None):
+def compute_loss(logits, labels, mode_train):
     """Mode-dependent loss. Same for pretrain/midtrain (cross_entropy), extensible for SFT/RL."""
-    ignore_index = pad_token_id if pad_token_id is not None else -100
     if TRAIN_CONFIGS[mode_train]['loss_fn'] == 'cross_entropy':
-        return F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1),
-                               ignore_index=ignore_index)
+        return F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
     raise ValueError(f"Unknown loss_fn: {TRAIN_CONFIGS[mode_train]['loss_fn']}")
 
 
@@ -475,7 +425,7 @@ def compute_loss(logits, labels, mode_train, pad_token_id=None):
 def train_epoch(model, train_loader, optimizer, scheduler, scaler, device, rank, world_size,
                 global_step, max_steps, accumulate_grad_batches, gradient_clip_val, log_every_n_steps,
                 use_wandb, pbar, val_check_interval, val_loaders, tokenizer, limit_val_batches,
-                warmup_steps, mode_train, checkpoint_dir=None, core_examples=27, pad_token_id=None):
+                warmup_steps, mode_train, checkpoint_dir=None, core_examples=27):
     model.train()
     optimizer.zero_grad()
 
@@ -488,7 +438,7 @@ def train_epoch(model, train_loader, optimizer, scheduler, scaler, device, rank,
 
         with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=(device.type == 'cuda')):
             logits = model(input_ids)
-            loss = compute_loss(logits, labels, mode_train, pad_token_id)
+            loss = compute_loss(logits, labels, mode_train)
             loss = loss / accumulate_grad_batches
 
         scaler.scale(loss).backward()
@@ -535,7 +485,7 @@ def train_epoch(model, train_loader, optimizer, scheduler, scaler, device, rank,
             if global_step % val_check_interval == 0:
                 validate(model, val_loaders, device, rank, world_size, global_step,
                         tokenizer, use_wandb, limit_val_batches, mode_train,
-                        core_examples, pad_token_id)
+                        core_examples)
                 model.train()
 
                 if checkpoint_dir:
@@ -552,7 +502,7 @@ def train_epoch(model, train_loader, optimizer, scheduler, scaler, device, rank,
 # ---- Validation ----
 
 def validate(model, val_loaders, device, rank, world_size, global_step, tokenizer,
-             use_wandb, limit_val_batches, mode_train, core_examples=27, pad_token_id=None):
+             use_wandb, limit_val_batches, mode_train, core_examples=27):
     """Run per-dataset validation and CORE eval."""
     model.eval()
     log_dict = {'global_step': global_step}
@@ -572,7 +522,7 @@ def validate(model, val_loaders, device, rank, world_size, global_step, tokenize
 
                 with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=(device.type == 'cuda')):
                     logits = model(input_ids)
-                    loss = compute_loss(logits, labels, mode_train, pad_token_id)
+                    loss = compute_loss(logits, labels, mode_train)
 
                 total_loss += loss.item()
                 num_batches += 1
@@ -759,13 +709,9 @@ if __name__ == "__main__":
 
     scaler = torch.amp.GradScaler('cuda', enabled=(accelerator == 'gpu'))
 
-    bos_token_id = tokenizer.bos_token_id
-    pad_token_id = tokenizer.pad_token_id
-
     train_loader, val_loaders = create_dataloaders(
         mode_train, tokenizer, batch_size, max_seq_len,
-        num_workers=0, val_sequences=1000, rank=rank, world_size=world_size,
-        bos_token_id=bos_token_id, pad_token_id=pad_token_id
+        num_workers=0, val_sequences=1000, rank=rank, world_size=world_size
     )
 
     use_wandb = rank == 0 and is_training
@@ -825,7 +771,7 @@ if __name__ == "__main__":
         # Run per-dataset validation
         validate(model, val_loaders, device, rank, world_size, global_step,
                 tokenizer, False, limit_val_batches, mode_train,
-                args.core_examples, pad_token_id)
+                args.core_examples)
 
         cleanup_distributed()
         exit(0)
@@ -841,7 +787,7 @@ if __name__ == "__main__":
             global_step, max_steps, accumulate_grad_batches, gradient_clip_val, log_every_n_steps,
             use_wandb, pbar, val_check_interval, val_loaders, tokenizer, limit_val_batches,
             warmup_steps, mode_train, checkpoint_dir=checkpoint_dir,
-            core_examples=args.core_examples, pad_token_id=pad_token_id
+            core_examples=args.core_examples
         )
 
     pbar.close()

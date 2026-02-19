@@ -103,7 +103,13 @@ The paradigm here is only having training and validation. We hold out a parquet 
 
 # Mid-training
 
-With pre-training done let's test out mid-training (I know K ended up removing mid-training but whatever this is fun). The major changes here are (i) introducing special tokens (BOS, roles) and (ii) training on conversational data. I'm going to use 30% FineWebEdu  (same data as pre-training) and 70% mix of SmolTalk (synthetic multi-turn QA in technical domains) and UltaChatGen (synthetic dialogue and currated discussions). Goal is to hit 5B tokens with this distribution so with batch_size 18 and 4XH100 GPUs that's ~20k iterations. 
+Session 1: With pre-training done let's test out mid-training (I know K ended up removing mid-training but whatever this is fun). The major changes here are (i) introducing special tokens (BOS, roles) and (ii) training on conversational data. I'm going to use 30% FineWebEdu  (same data as pre-training) and 70% mix of SmolTalk (synthetic multi-turn QA in technical domains) and UltaChatGen (synthetic dialogue and currated discussions). Goal is to hit 5B tokens with this distribution so with batch_size 18 and 4XH100 GPUs that's ~20k iterations (id = pu94vo4r).
+
+Session 2: Something I realized during training was the CORE metric was both very noisy and not increasing much. I originally took this as due to high learning rate, but realized (i) few sequences were making up the CORE metric and (ii) I was padding, and not packing, the mid-training data. Playing around with more complex QA and knowledge checks it gets the sentence structure and flavor of the answer, but hardly the exact answer. Let's try this again. If we still want to get to 5B mid-training tokens, previous session was really ~50%, so we have to do another 2.5B, or 10k iterations of the new packed dataset.
+
+To fetch do the following:
+
+scp -r -P 18650 -i ~/.ssh/id_ed25519 root@216.243.220.216:/workspace/project-llm-chat/logs/pu94vo4r/ /home/zaccosenza/code/project-llm-chat/logs/pu94vo4r/
 
 # Infrastructure and multi-GPU setup
 
