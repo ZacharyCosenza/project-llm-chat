@@ -125,7 +125,7 @@ I think all together (1) (2) (3) all point to a poor model with low performance 
 
 # SFT
 
-
+From experiments on conversational data (ultachat and smoltalk) we have ~ 30 + 8 + 7 M tokens / shard * 30 shards = ~1.35B tokens. Assuming 2048 tokens / seq, 18 batch size, 4 GPUs and our logic of accumulate_grad_batches = max(1, 4 // world_size) = 1, I get 8.8k iterations to run through all data in a single epoch. Reading the literature I tend to see SFT being done on basis of number of examples rather than number of tokens, of which we have ~1.4M examples in our datasets. So the question is do we start SFT with many synthetic examples or few high quality examples? The usualy answer is few high quality, but as we've already established, my model is ~40% undertrained, so something inbetween mid-training and SFT might be best here. 
 
 # Infrastructure and multi-GPU setup
 

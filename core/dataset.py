@@ -139,6 +139,88 @@ def download_conversation_data():
     return True
 
 
+LIMA_DATA_DIR = os.path.join(_SCRIPT_DIR, '..', 'data', 'lima_data')
+
+def download_lima():
+    """Download GAIR/lima and save as a single parquet file.
+
+    LIMA contains ~1K high-quality human-curated conversations.
+    The raw dataset uses a flat `conversations` list (alternating user/assistant strings).
+    We convert to the standard `messages` format: [{"role": ..., "content": ...}]
+    and add source='lima' for compatibility with PackedStreamingDataset's source_filter.
+
+    Uses HuggingFace datasets-server parquet API to bypass the deprecated dataset
+    loading script (GAIR/lima uses an old-style lima.py that datasets 3.x no longer runs).
+
+    Output: data/lima_data/lima.parquet
+    """
+    import pyarrow.parquet as pq_raw
+    from datasets import Dataset
+
+    lima_dir = os.path.abspath(LIMA_DATA_DIR)
+    lima_path = os.path.join(lima_dir, "lima.parquet")
+
+    if os.path.exists(lima_path):
+        print(f"LIMA already exists at {lima_path}")
+        return True
+
+    os.makedirs(lima_dir, exist_ok=True)
+
+    # GAIR/lima is a gated dataset — requires a HuggingFace token.
+    # 1. Go to https://huggingface.co/datasets/GAIR/lima and accept the terms.
+    # 2. Create a token at https://huggingface.co/settings/tokens
+    # 3. Set it: export HF_TOKEN=hf_...
+    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    if not hf_token:
+        raise RuntimeError(
+            "GAIR/lima is a gated dataset. Set HF_TOKEN to your HuggingFace token.\n"
+            "  1. Accept terms at: https://huggingface.co/datasets/GAIR/lima\n"
+            "  2. Create a token at: https://huggingface.co/settings/tokens\n"
+            "  3. export HF_TOKEN=hf_..."
+        )
+    headers = {"Authorization": f"Bearer {hf_token}"}
+
+    # Ask the HuggingFace datasets-server for auto-converted parquet URLs
+    api_url = "https://datasets-server.huggingface.co/parquet?dataset=GAIR/lima"
+    print("Fetching LIMA parquet URLs from HuggingFace datasets server...")
+    resp = requests.get(api_url, headers=headers, timeout=30)
+    resp.raise_for_status()
+    parquet_urls = [f["url"] for f in resp.json()["parquet_files"] if f["split"] == "train"]
+    print(f"  Found {len(parquet_urls)} parquet file(s)")
+
+    # Download each shard to a temp file, read with pyarrow, then delete
+    import pyarrow as pa
+    tables = []
+    for url in parquet_urls:
+        tmp = lima_path + ".tmp"
+        print(f"  Downloading {url.split('/')[-1]}...")
+        r = requests.get(url, headers=headers, stream=True, timeout=60)
+        r.raise_for_status()
+        with open(tmp, "wb") as f:
+            for chunk in r.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    f.write(chunk)
+        tables.append(pq_raw.read_table(tmp))
+        os.unlink(tmp)
+
+    raw = pa.concat_tables(tables)
+    print(f"  LIMA: {len(raw)} conversations")
+
+    # Convert flat alternating string list → [{role, content}] dicts
+    roles = ["user", "assistant"]
+    conversations_col = raw.column("conversations").to_pylist()
+    messages_list = [
+        [{"role": roles[i % 2], "content": text} for i, text in enumerate(turns)]
+        for turns in conversations_col
+    ]
+
+    # Save using HuggingFace Dataset.to_parquet for schema consistency with SmolTalk/UltraChat
+    out = Dataset.from_dict({"messages": messages_list, "source": ["lima"] * len(messages_list)})
+    out.to_parquet(lima_path)
+    print(f"  Saved {len(out)} conversations to {lima_path}")
+    return True
+
+
 EVAL_BUNDLE_URL = "https://karpathy-public.s3.us-west-2.amazonaws.com/eval_bundle.zip"
 EVAL_DIR = os.path.join(_SCRIPT_DIR, '..', 'data', 'eval_data')
 
@@ -199,9 +281,13 @@ if __name__ == "__main__":
                         help="Download CORE eval bundle")
     parser.add_argument("--conversation", action="store_true",
                         help="Download SmolTalk + UltraChat conversation data for midtraining")
+    parser.add_argument("--lima", action="store_true",
+                        help="Download GAIR/lima high-quality SFT data (~1K conversations)")
     args = parser.parse_args()
 
-    if args.conversation:
+    if args.lima:
+        download_lima()
+    elif args.conversation:
         download_conversation_data()
     elif args.eval:
         download_eval_bundle()

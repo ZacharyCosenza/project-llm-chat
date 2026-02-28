@@ -307,7 +307,14 @@ class MixedStreamingDataset(IterableDataset):
             r = rng.random()
             idx = bisect(self.cumulative, r)
             idx = min(idx, len(iters) - 1)
-            yield next(iters[idx])
+            try:
+                yield next(iters[idx])
+            except StopIteration:
+                # Sub-dataset exhausted — restart it (PEP 479: StopIteration raised inside
+                # a generator becomes RuntimeError, so we must catch it here explicitly)
+                _, ds = self.datasets_with_names[idx]
+                iters[idx] = iter(ds)
+                yield next(iters[idx])
 
 
 # ---- Collate ----
@@ -809,7 +816,7 @@ def create_optimizer_and_scheduler(model, peak_lr, min_lr, weight_decay, warmup_
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch_size', type=int, default=18)
-    parser.add_argument('--max_steps', type=int, default=70000)
+    parser.add_argument('--max_steps', type=int, default=80000)
     parser.add_argument('--fast_dev_run', type=int, default=0)
     parser.add_argument('--resume', type=str, default=None)
     parser.add_argument('--mode', type=str, default='pretrain', choices=['test', 'pretrain', 'midtrain', 'sft'])
