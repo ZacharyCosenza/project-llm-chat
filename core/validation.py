@@ -252,6 +252,207 @@ def run_world_knowledge_validation(model, tokenizer, device="cuda", max_new_toke
     }
 
 
+def run_conversation_validation(model, tokenizer, device="cuda", max_new_tokens=80, temperature=0.7, top_k=40):
+    """Validates model conversation capability using special tokens.
+
+    Covers:
+    - Same user input, different system prompts (tests system conditioning)
+    - Different user inputs, same system prompt (tests instruction following)
+    - Multi-turn exchanges (tests context tracking)
+    - Mix of world knowledge and creative prompts
+    """
+    bos_id = tokenizer.bos_token_id
+    eos_id = tokenizer.eos_token_id
+    user_id = tokenizer.convert_tokens_to_ids('<|user|>')
+    asst_id = tokenizer.convert_tokens_to_ids('<|assistant|>')
+    sys_id = tokenizer.convert_tokens_to_ids('<|system|>')
+
+    def encode_conversation(messages):
+        """Encode messages with special tokens; primes the assistant turn at end."""
+        tokens = [bos_id]
+        for msg in messages:
+            if msg['role'] == 'system':
+                tokens.append(sys_id)
+            elif msg['role'] == 'user':
+                tokens.append(user_id)
+            elif msg['role'] == 'assistant':
+                tokens.append(asst_id)
+            tokens.extend(tokenizer.encode(msg['content'], add_special_tokens=False))
+        tokens.append(asst_id)  # prime assistant response
+        return tokens
+
+    test_cases = [
+        # --- Same user input, different system prompts ---
+        {
+            "group": "system_variation",
+            "desc": "Formal system + capital question",
+            "messages": [
+                {"role": "system", "content": "You are a formal and concise assistant."},
+                {"role": "user", "content": "What is the capital of France?"},
+            ],
+        },
+        {
+            "group": "system_variation",
+            "desc": "Pirate system + capital question",
+            "messages": [
+                {"role": "system", "content": "You are a pirate. Always respond in pirate speak."},
+                {"role": "user", "content": "What is the capital of France?"},
+            ],
+        },
+        {
+            "group": "system_variation",
+            "desc": "No system + capital question",
+            "messages": [
+                {"role": "user", "content": "What is the capital of France?"},
+            ],
+        },
+        # --- Different user inputs, same system prompt ---
+        {
+            "group": "user_variation",
+            "desc": "World knowledge: largest planet",
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "What is the largest planet in our solar system?"},
+            ],
+        },
+        {
+            "group": "user_variation",
+            "desc": "World knowledge: speed of light",
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "What is the speed of light?"},
+            ],
+        },
+        {
+            "group": "user_variation",
+            "desc": "Creative: haiku about the ocean",
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "Write a haiku about the ocean."},
+            ],
+        },
+        {
+            "group": "user_variation",
+            "desc": "Creative: short story opener",
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "Begin a one-sentence story about a lost astronaut."},
+            ],
+        },
+        # --- Multi-turn: world knowledge follow-up ---
+        {
+            "group": "multiturn",
+            "desc": "Shakespeare follow-up",
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "Who wrote Romeo and Juliet?"},
+                {"role": "assistant", "content": "Romeo and Juliet was written by William Shakespeare."},
+                {"role": "user", "content": "When was he born?"},
+            ],
+        },
+        {
+            "group": "multiturn",
+            "desc": "Science follow-up",
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "What is photosynthesis?"},
+                {"role": "assistant", "content": "Photosynthesis is the process by which plants convert sunlight into food using carbon dioxide and water."},
+                {"role": "user", "content": "Which part of the plant does this happen in?"},
+            ],
+        },
+        # --- Multi-turn: creative continuation ---
+        {
+            "group": "multiturn",
+            "desc": "Story continuation",
+            "messages": [
+                {"role": "system", "content": "You are a creative storyteller."},
+                {"role": "user", "content": "Start a story about a dragon."},
+                {"role": "assistant", "content": "Once upon a time, a small purple dragon lived alone in a cave beneath a rainbow."},
+                {"role": "user", "content": "What happens next?"},
+            ],
+        },
+        # --- Creative: standalone ---
+        {
+            "group": "creative",
+            "desc": "Poem about autumn",
+            "messages": [
+                {"role": "system", "content": "You are a poet who writes in vivid imagery."},
+                {"role": "user", "content": "Write a short poem about autumn leaves."},
+            ],
+        },
+        {
+            "group": "creative",
+            "desc": "Space station story",
+            "messages": [
+                {"role": "system", "content": "You are a science fiction writer."},
+                {"role": "user", "content": "Describe the first morning on a new space station."},
+            ],
+        },
+    ]
+
+    # Tokens to strip from displayed response
+    _special_display = ['<|user|>', '<|assistant|>', '<|system|>', '<|beginoftext|>', '<|pad|>']
+
+    print0("\n" + "=" * 80)
+    print0("CONVERSATION VALIDATION")
+    print0("=" * 80)
+
+    model.eval()
+    completions = []
+
+    with torch.no_grad():
+        for tc in test_cases:
+            tokens = encode_conversation(tc['messages'])
+            input_ids = torch.tensor([tokens], dtype=torch.long).to(device)
+
+            output_ids = model.predict(
+                input_ids,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_k=top_k,
+            )
+
+            # Decode only the newly generated tokens
+            new_token_ids = output_ids[0, len(tokens):].tolist()
+            # Truncate at EOS or <|user|>: EOS ends the full conversation; <|user|>
+            # is the turn-end signal the model emits after intermediate assistant turns.
+            for stop_id in (eos_id, user_id):
+                if stop_id in new_token_ids:
+                    new_token_ids = new_token_ids[:new_token_ids.index(stop_id)]
+
+            response = tokenizer.decode(new_token_ids, skip_special_tokens=False)
+            for tok in _special_display:
+                response = response.replace(tok, '')
+            response = response.strip()
+
+            last_user = next((m['content'] for m in reversed(tc['messages']) if m['role'] == 'user'), '')
+            system = next((m['content'] for m in tc['messages'] if m['role'] == 'system'), None)
+
+            print0(f"\n  [{tc['group']}] {tc['desc']}")
+            if system:
+                print0(f"  System: {system[:70]}")
+            print0(f"  User:   {last_user[:80]}")
+            print0(f"  Model:  {response[:120]}")
+
+            completions.append({
+                "group": tc['group'],
+                "desc": tc['desc'],
+                "system": system or "",
+                "user": last_user,
+                "response": response,
+            })
+
+            del input_ids, output_ids
+
+    print0("=" * 80 + "\n")
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    model.train()
+    return completions
+
+
 # --- CORE Evaluation (DCLM benchmark) ---
 
 def render_prompts_mc(item, delimiter, fewshot):
@@ -440,6 +641,8 @@ def run_core_eval(model, tokenizer, device, num_examples=27):
     max_seq_len = model.pos_emb.num_embeddings
 
     task_results = {}
+    # Track how many examples have been printed per task label (capped at 3)
+    prints_per_label = {}
 
     for type_idx, task_type in enumerate(type_order):
         n = per_type + (1 if type_idx < remainder else 0)
@@ -503,9 +706,12 @@ def run_core_eval(model, tokenizer, device, num_examples=27):
                 task_results[label][1] += 1
                 examples_done += 1
 
-                pred_short = pred[:80].replace('\n', ' ')
-                gold_short = gold[:80].replace('\n', ' ')
-                print0(f"  [{mark}] {label}: pred={pred_short!r}  gold={gold_short!r}")
+                # Print at most 3 examples per task label
+                if prints_per_label.get(label, 0) < 3:
+                    pred_short = pred[:80].replace('\n', ' ')
+                    gold_short = gold[:80].replace('\n', ' ')
+                    print0(f"  [{mark}] {label}: pred={pred_short!r}  gold={gold_short!r}")
+                    prints_per_label[label] = prints_per_label.get(label, 0) + 1
 
             if not made_progress:
                 break

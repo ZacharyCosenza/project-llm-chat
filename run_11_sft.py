@@ -12,7 +12,6 @@ from transformers import AutoTokenizer
 from collections import deque
 from bisect import bisect
 import random
-import json
 from itertools import cycle
 from torch.utils.data import IterableDataset, DataLoader
 import pyarrow.parquet as pq
@@ -31,7 +30,6 @@ TRAIN_CONFIGS = {
         'weight_decay': 0.1,
         'warmup_ratio': 0.01,
         'datasets': {'fineweb': 1.0},
-        'loss_fn': 'cross_entropy',
     },
     'midtrain': {
         'peak_lr': 3e-4,
@@ -44,7 +42,17 @@ TRAIN_CONFIGS = {
             'ultrachat_gen': 0.119,
             'ultrachat_sft': 0.0966,
         },
-        'loss_fn': 'cross_entropy',
+    },
+    'sft': {
+        'peak_lr': 2e-5,
+        'min_lr': 2e-6,
+        'weight_decay': 0.01,
+        'warmup_ratio': 0.05,
+        'datasets': {
+            'smoltalk': 0.65,
+            'ultrachat_gen': 0.20,
+            'ultrachat_sft': 0.15,
+        },
     },
 }
 
@@ -58,11 +66,19 @@ class PackedStreamingDataset(IterableDataset):
     - 'conversation': Messages column with source. Formats as [BOS, role, content..., EOS].
       Optionally filters by source field.
 
-    All formats pack into a continuous buffer and chunk at seq_length+1.
+    Every yielded batch includes a 'loss_mask' tensor (float, same shape as labels) controlled
+    by mask_policy, which also determines the packing strategy:
+    - 'all': linear stream-packing (no padding, no boundary alignment); loss on every token.
+      Used for pretrain and midtrain.
+    - 'assistant_only': conversation-boundary-aligned packing; each chunk always starts at the
+      beginning of a conversation to avoid mid-conversation context gaps. Conversations longer
+      than seq_length are truncated; short chunks are padded with pad_token_id (loss_mask=0).
+      Loss only on: <|assistant|> role token, assistant content, the <|user|> token immediately
+      following an assistant turn (turn-end signal), and EOS after the final assistant turn.
     """
     def __init__(self, files, tokenizer, seq_length=2048,
                  rank=0, world_size=1, shuffle=False, max_sequences=None,
-                 data_format='text', source_filter=None):
+                 data_format='text', source_filter=None, mask_policy='all'):
         self.files = list(files)
         self.tokenizer = tokenizer
         self.seq_length = seq_length
@@ -72,10 +88,12 @@ class PackedStreamingDataset(IterableDataset):
         self.max_sequences = max_sequences
         self.data_format = data_format
         self.source_filter = source_filter
+        self.mask_policy = mask_policy
 
         # Cache special token IDs
         self.bos_token_id = tokenizer.bos_token_id
         self.eos_token_id = tokenizer.eos_token_id
+        self.pad_token_id = tokenizer.pad_token_id
         if data_format == 'conversation':
             self.role_ids = {
                 'user': tokenizer.convert_tokens_to_ids('<|user|>'),
@@ -84,24 +102,61 @@ class PackedStreamingDataset(IterableDataset):
             }
 
     def _tokenize_text(self, text):
-        """Tokenize raw text, append EOS."""
+        """Tokenize raw text, append EOS. Returns (tokens, loss_mask)."""
         tokens = self.tokenizer.encode(text, add_special_tokens=False)
         tokens.append(self.eos_token_id)
-        return tokens
+        mask = [1] * len(tokens)
+        return tokens, mask
 
     def _tokenize_conversation(self, messages):
-        """Format conversation as [BOS, role, content..., role, content..., EOS]."""
+        """Format conversation as [BOS, role, content..., EOS]. Returns (tokens, loss_mask).
+
+        mask_policy='all': all positions are 1 (loss everywhere).
+        mask_policy='assistant_only':
+          - <|assistant|> role token: 1 (model learns response-start transition)
+          - assistant content: 1
+          - <|user|> immediately after an assistant turn: 1 (turn-end signal)
+          - EOS after the final assistant turn: 1
+          - everything else (BOS, system tokens, user content, opening role tokens): 0
+        """
         tokens = [self.bos_token_id]
+        mask = [0]  # BOS: not a model-generated token in either policy
+
+        prev_role = None
         for msg in messages:
-            role_id = self.role_ids.get(msg['role'])
+            role = msg['role']
+            role_id = self.role_ids.get(role)
+            is_asst = role == 'assistant'
+
+            if self.mask_policy == 'all':
+                role_mask = 1
+                content_mask = 1
+            else:  # 'assistant_only'
+                # <|user|> immediately following an assistant turn is the turn-end signal
+                is_turn_end = (role == 'user' and prev_role == 'assistant')
+                role_mask = 1 if (is_asst or is_turn_end) else 0
+                content_mask = 1 if is_asst else 0
+
             if role_id is not None:
                 tokens.append(role_id)
-            tokens.extend(self.tokenizer.encode(msg['content'], add_special_tokens=False))
+                mask.append(role_mask)
+
+            content_ids = self.tokenizer.encode(msg['content'], add_special_tokens=False)
+            tokens.extend(content_ids)
+            mask.extend([content_mask] * len(content_ids))
+            prev_role = role
+
         tokens.append(self.eos_token_id)
-        return tokens
+        if self.mask_policy == 'all':
+            mask.append(1)
+        else:
+            # EOS ends an assistant response only when the last message was assistant
+            mask.append(1 if prev_role == 'assistant' else 0)
+
+        return tokens, mask
 
     def _iter_tokens_from_file(self, filepath):
-        """Yield token lists from a single parquet file."""
+        """Yield (tokens, loss_mask) pairs from a single parquet file."""
         pf = pq.ParquetFile(filepath)
 
         if self.data_format == 'text':
@@ -142,20 +197,86 @@ class PackedStreamingDataset(IterableDataset):
         if not my_file_indices:
             return
 
-        buffer = deque()
+        file_iter = cycle(my_file_indices) if self.max_sequences else iter(my_file_indices)
+
+        if self.mask_policy == 'assistant_only':
+            yield from self._yield_bos_aligned(files, file_iter)
+        else:
+            yield from self._yield_packed(files, file_iter)
+
+    def _yield_packed(self, files, file_iter):
+        """Linear stream-packing: extend a token buffer and emit fixed-length chunks.
+
+        Tokens from consecutive documents/conversations flow into a single deque with no
+        padding and no respect for boundaries. loss_mask[i] = 1 iff labels[i] (chunk_t[i+1])
+        is a token the model trains on (always true here — mask_policy='all').
+        """
+        buffer_t = deque()
+        buffer_m = deque()
         sequences_yielded = 0
 
-        file_iter = cycle(my_file_indices) if self.max_sequences else iter(my_file_indices)
         for file_idx in file_iter:
-            for tokens in self._iter_tokens_from_file(files[file_idx]):
-                buffer.extend(tokens)
+            for tokens, mask in self._iter_tokens_from_file(files[file_idx]):
+                buffer_t.extend(tokens)
+                buffer_m.extend(mask)
 
-                while len(buffer) >= self.seq_length + 1:
-                    chunk = [buffer.popleft() for _ in range(self.seq_length + 1)]
+                while len(buffer_t) >= self.seq_length + 1:
+                    chunk_t = [buffer_t.popleft() for _ in range(self.seq_length + 1)]
+                    chunk_m = [buffer_m.popleft() for _ in range(self.seq_length + 1)]
                     yield {
-                        'input_ids': torch.tensor(chunk[:-1], dtype=torch.long),
-                        'labels': torch.tensor(chunk[1:], dtype=torch.long)
+                        'input_ids': torch.tensor(chunk_t[:-1], dtype=torch.long),
+                        'labels':    torch.tensor(chunk_t[1:],  dtype=torch.long),
+                        'loss_mask': torch.tensor(chunk_m[1:],  dtype=torch.float),
                     }
+                    sequences_yielded += 1
+                    if self.max_sequences and sequences_yielded >= self.max_sequences:
+                        return
+
+    def _yield_bos_aligned(self, files, file_iter):
+        """Conversation-boundary-aligned packing for SFT (mask_policy='assistant_only').
+
+        Each chunk starts at the beginning of a conversation so the model always has full
+        context for any assistant turn it trains on. When the next conversation would overflow
+        the current chunk, the chunk is padded to seq_length+1 with pad_token_id (loss_mask=0)
+        and yielded. Conversations longer than seq_length are truncated.
+        """
+        buffer_t = []
+        buffer_m = []
+        sequences_yielded = 0
+
+        for file_idx in file_iter:
+            for tokens, mask in self._iter_tokens_from_file(files[file_idx]):
+                # Truncate conversations that exceed the full chunk size
+                if len(tokens) > self.seq_length + 1:
+                    tokens = tokens[:self.seq_length + 1]
+                    mask = mask[:self.seq_length + 1]
+
+                # Flush current buffer when this conversation won't fit
+                if buffer_t and len(buffer_t) + len(tokens) > self.seq_length + 1:
+                    pad_len = self.seq_length + 1 - len(buffer_t)
+                    chunk_t = buffer_t + [self.pad_token_id] * pad_len
+                    chunk_m = buffer_m + [0] * pad_len
+                    buffer_t, buffer_m = [], []
+                    yield {
+                        'input_ids': torch.tensor(chunk_t[:-1], dtype=torch.long),
+                        'labels':    torch.tensor(chunk_t[1:],  dtype=torch.long),
+                        'loss_mask': torch.tensor(chunk_m[1:],  dtype=torch.float),
+                    }
+                    sequences_yielded += 1
+                    if self.max_sequences and sequences_yielded >= self.max_sequences:
+                        return
+
+                buffer_t.extend(tokens)
+                buffer_m.extend(mask)
+
+                # Yield immediately when buffer is exactly full (no padding needed)
+                if len(buffer_t) == self.seq_length + 1:
+                    yield {
+                        'input_ids': torch.tensor(buffer_t[:-1], dtype=torch.long),
+                        'labels':    torch.tensor(buffer_t[1:],  dtype=torch.long),
+                        'loss_mask': torch.tensor(buffer_m[1:],  dtype=torch.float),
+                    }
+                    buffer_t, buffer_m = [], []
                     sequences_yielded += 1
                     if self.max_sequences and sequences_yielded >= self.max_sequences:
                         return
@@ -194,7 +315,8 @@ class MixedStreamingDataset(IterableDataset):
 def collate_fn(batch):
     return {
         'input_ids': torch.stack([x['input_ids'] for x in batch]),
-        'labels': torch.stack([x['labels'] for x in batch])
+        'labels':    torch.stack([x['labels']    for x in batch]),
+        'loss_mask': torch.stack([x['loss_mask'] for x in batch]),
     }
 
 
@@ -306,6 +428,45 @@ def create_dataloaders(mode_train, tokenizer, batch_size, seq_length,
                 data_format='conversation', source_filter=source
             )
             val_loaders[source] = DataLoader(
+                conv_val, batch_size=batch_size, collate_fn=collate_fn,
+                num_workers=num_workers, pin_memory=True
+            )
+
+    elif mode_train == 'sft':
+        conv_dir = Path('data/conversation_data')
+        conv_files = sorted(conv_dir.glob("*.parquet"))
+        conv_val_files = conv_files[:1]
+        conv_train_files = conv_files[1:]
+
+        sources = list(dataset_config.keys())
+        probabilities = list(dataset_config.values())
+        print0(f"Data: {len(conv_train_files)} conversation train shards (SFT, assistant-only loss)")
+        print0(f"  Mix: {' | '.join(f'{k}={v:.1%}' for k, v in dataset_config.items())}")
+
+        datasets_with_names = [
+            (src, PackedStreamingDataset(
+                conv_train_files, tokenizer, seq_length, rank=rank, world_size=world_size,
+                shuffle=True, data_format='conversation', source_filter=src,
+                mask_policy='assistant_only',
+            ))
+            for src in sources
+        ]
+        train_dataset = MixedStreamingDataset(datasets_with_names, probabilities, seed=42, rank=rank)
+        train_loader = DataLoader(
+            train_dataset, batch_size=batch_size, collate_fn=collate_fn,
+            num_workers=num_workers, pin_memory=True,
+            prefetch_factor=2 if num_workers > 0 else None
+        )
+
+        val_seqs_per_dataset = val_sequences // len(sources)
+        for src in sources:
+            conv_val = PackedStreamingDataset(
+                conv_val_files, tokenizer, seq_length, rank=0, world_size=1,
+                shuffle=False, max_sequences=val_seqs_per_dataset,
+                data_format='conversation', source_filter=src,
+                mask_policy='assistant_only',
+            )
+            val_loaders[src] = DataLoader(
                 conv_val, batch_size=batch_size, collate_fn=collate_fn,
                 num_workers=num_workers, pin_memory=True
             )
@@ -433,11 +594,19 @@ def resize_embeddings(model, new_vocab_size):
 
 # ---- Loss function ----
 
-def compute_loss(logits, labels, mode_train):
-    """Mode-dependent loss. Same for pretrain/midtrain (cross_entropy), extensible for SFT/RL."""
-    if TRAIN_CONFIGS[mode_train]['loss_fn'] == 'cross_entropy':
-        return F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
-    raise ValueError(f"Unknown loss_fn: {TRAIN_CONFIGS[mode_train]['loss_fn']}")
+def compute_loss(logits, labels, loss_mask):
+    """Masked token-level cross-entropy.
+
+    loss_mask is a float tensor matching labels: 1.0 where the token contributes
+    to the loss, 0.0 where it is masked out. For pretrain/midtrain the mask is all
+    ones (equivalent to standard mean cross-entropy). For SFT the mask covers only
+    assistant-generated tokens. Uses sum/count rather than mean to avoid dividing by
+    zero when a packed chunk contains no unmasked tokens.
+    """
+    per_token = F.cross_entropy(
+        logits.view(-1, logits.size(-1)), labels.view(-1), reduction='none'
+    ).view(labels.shape)
+    return (per_token * loss_mask).sum() / loss_mask.sum().clamp(min=1)
 
 
 # ---- Training ----
@@ -445,7 +614,7 @@ def compute_loss(logits, labels, mode_train):
 def train_epoch(model, train_loader, optimizer, scheduler, scaler, device, rank, world_size,
                 global_step, max_steps, accumulate_grad_batches, gradient_clip_val, log_every_n_steps,
                 use_wandb, pbar, val_check_interval, val_loaders, tokenizer, limit_val_batches,
-                warmup_steps, mode_train, checkpoint_dir=None, core_examples=27):
+                warmup_steps, checkpoint_dir=None, core_examples=27):
     model.train()
     optimizer.zero_grad()
 
@@ -454,11 +623,12 @@ def train_epoch(model, train_loader, optimizer, scheduler, scaler, device, rank,
             break
 
         input_ids = batch['input_ids'].to(device)
-        labels = batch['labels'].to(device)
+        labels    = batch['labels'].to(device)
+        loss_mask = batch['loss_mask'].to(device)
 
         with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=(device.type == 'cuda')):
             logits = model(input_ids)
-            loss = compute_loss(logits, labels, mode_train)
+            loss = compute_loss(logits, labels, loss_mask)
             loss = loss / accumulate_grad_batches
 
         scaler.scale(loss).backward()
@@ -504,7 +674,7 @@ def train_epoch(model, train_loader, optimizer, scheduler, scaler, device, rank,
 
             if global_step % val_check_interval == 0:
                 validate(model, val_loaders, device, rank, world_size, global_step,
-                        tokenizer, use_wandb, limit_val_batches, mode_train,
+                        tokenizer, use_wandb, limit_val_batches,
                         core_examples)
                 model.train()
 
@@ -522,7 +692,7 @@ def train_epoch(model, train_loader, optimizer, scheduler, scaler, device, rank,
 # ---- Validation ----
 
 def validate(model, val_loaders, device, rank, world_size, global_step, tokenizer,
-             use_wandb, limit_val_batches, mode_train, core_examples=27):
+             use_wandb, limit_val_batches, core_examples=27):
     """Run per-dataset validation and CORE eval."""
     model.eval()
     log_dict = {'global_step': global_step}
@@ -538,11 +708,12 @@ def validate(model, val_loaders, device, rank, world_size, global_step, tokenize
                     break
 
                 input_ids = batch['input_ids'].to(device)
-                labels = batch['labels'].to(device)
+                labels    = batch['labels'].to(device)
+                loss_mask = batch['loss_mask'].to(device)
 
                 with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=(device.type == 'cuda')):
                     logits = model(input_ids)
-                    loss = compute_loss(logits, labels, mode_train)
+                    loss = compute_loss(logits, labels, loss_mask)
 
                 total_loss += loss.item()
                 num_batches += 1
@@ -641,11 +812,11 @@ if __name__ == "__main__":
     parser.add_argument('--max_steps', type=int, default=70000)
     parser.add_argument('--fast_dev_run', type=int, default=0)
     parser.add_argument('--resume', type=str, default=None)
-    parser.add_argument('--mode', type=str, default='pretrain', choices=['test', 'pretrain', 'midtrain'])
+    parser.add_argument('--mode', type=str, default='pretrain', choices=['test', 'pretrain', 'midtrain', 'sft'])
     parser.add_argument('--core_examples', type=int, default=500)
     args = parser.parse_args()
 
-    is_training = args.mode in ('pretrain', 'midtrain')
+    is_training = args.mode in ('pretrain', 'midtrain', 'sft')
     mode_train = args.mode if is_training else 'pretrain'  # test mode uses pretrain config for data
 
     rank, world_size, local_rank = setup_distributed()
@@ -690,7 +861,7 @@ if __name__ == "__main__":
     print0(f"Peak LR: {peak_lr}, Min LR: {min_lr}, Weight decay: {weight_decay}")
     print0(f"Warmup steps: {warmup_steps} ({train_config['warmup_ratio']*100:.1f}% of {max_steps})")
     print0(f"Datasets: {' | '.join(f'{k}={v:.1%}' for k, v in train_config['datasets'].items())}")
-    print0(f"Loss: {train_config['loss_fn']}")
+    print0(f"Mask policy: {'assistant_only' if mode_train == 'sft' else 'all'}")
 
     if torch.cuda.is_available():
         device = torch.device(f'cuda:{local_rank}')
@@ -769,7 +940,7 @@ if __name__ == "__main__":
                 "warmup_steps": warmup_steps, "max_steps": max_steps,
                 "use_special_tokens": True,
                 "dataset_mix": train_config['datasets'],
-                "loss_fn": train_config['loss_fn'],
+                "mask_policy": "assistant_only" if mode_train == "sft" else "all",
             }
         )
 
@@ -802,7 +973,7 @@ if __name__ == "__main__":
 
         # Run per-dataset validation
         validate(model, val_loaders, device, rank, world_size, global_step,
-                tokenizer, False, limit_val_batches, mode_train,
+                tokenizer, False, limit_val_batches,
                 args.core_examples)
 
         cleanup_distributed()
@@ -818,7 +989,7 @@ if __name__ == "__main__":
             model, train_loader, optimizer, scheduler, scaler, device, rank, world_size,
             global_step, max_steps, accumulate_grad_batches, gradient_clip_val, log_every_n_steps,
             use_wandb, pbar, val_check_interval, val_loaders, tokenizer, limit_val_batches,
-            warmup_steps, mode_train, checkpoint_dir=checkpoint_dir,
+            warmup_steps, checkpoint_dir=checkpoint_dir,
             core_examples=args.core_examples
         )
 

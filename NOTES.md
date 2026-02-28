@@ -57,25 +57,23 @@ In further experiments, the VRAM memory issue, while resolved from a leakage per
 
 # Re-estimate of the size/scope of pre-training
 
-After futher experiments, I find that I can use a context window of 2048 for my model and hold it in memory on an H200 GPU with batch_size 22 at ~2.35s/iteration. This is less than the 32 that K uses and I am still investigating this. Let's say I want to keep my model at ~500M parameters and reach the 1e19 FLOP threshhold, this will require ~10B tokens (or about 170 shards). Each iteration FLOP count can be calculated as (batch_size = 22) * (context = 2048) * (num_parameters = 500M) * (forward + backwards = 6) * (gradient accumulation = 4) = 4e14. Thus, to get 1e19 FLOP total we need 1e5 (25,000) iterations. Using Chinchilla optimiality I get 20:1 -> 500M --> ~10B tokens --> 55k iterations. Let's split the difference and go with 40k iterations.
+After futher experiments, I find that I can use a context window of 2048 for my model and hold it in memory on an H200 GPU with batch_size 22 at ~2.35s/iteration. This is less than the 32 that K uses and I am still investigating this. Let's say I want to keep my model at ~500M parameters and reach the 1e19 FLOP threshhold, this will require ~10B tokens (or about 170 shards). Each iteration FLOP count can be calculated as (batch_size = 22) * (context = 2048) * (num_parameters = 500M) * (forward + backwards = 6) * (gradient accumulation = 4) = 4e14. This assumed a single H200 with grad_accum=4, giving 22 × 2048 × 4 = 180,224 tokens/optimizer step. Thus, to get 1e19 FLOP total we need 1e5 (25,000) iterations. Using Chinchilla optimiality I get 20:1 -> 500M --> ~10B tokens --> 55k iterations. Let's split the difference and go with 40k iterations.
 
-I tried to scale to 8XH100 but perhaps due to overhead issues I needed to reduce the batch_size to 18 to still get ~2.4s / iteration. 
-
-This would then require ~15,000 iterations. The logical next step is to compare the loss curve in single vs multi-GPU setup to validate this approach works, but my loss curves are identical even when increasing the learning rates. I ran some experiments and found that it was likley that was an artifact of training with a low learning rate early in pre-training. I just looked up what a common GPT2-style optimization technique looks like and used that, which seemed to work.
+I tried to scale to 8XH100 but perhaps due to overhead issues I needed to reduce the batch_size to 18 to still get ~2.4s / iteration. This would then require ~15,000 iterations. The logical next step is to compare the loss curve in single vs multi-GPU setup to validate this approach works, but my loss curves are identical even when increasing the learning rates. I ran some experiments and found that it was likley that was an artifact of training with a low learning rate early in pre-training. I just looked up what a common GPT2-style optimization technique looks like and used that, which seemed to work.
 
 # Pre-training
 
 Session 1: I will start pre-training. I first starting running on 2XH100 using batch_size = 22 for ~4k iterations while watching The Brutalist. That gives me 720,896,000 tokens (~720.9M), so ~9.28B to go (id = qfkhmres)!
 
-Session 2: Updated with improved saving. Let's reload the checkpoint and start at iteration 4000. If we use 4XH100. To finish training we'd need only 18k iterations here, but I needed to reduce batch_size = 18, so we're back up to needing 22k iterations. However I only got through ~500 iterations because I'm in a coffee shop with bad internet connection. Trained 147,456,000 tokens (~147.5M), cumulative ~868.4M, ~9.13B to go (id = 46acw8eb)
+Session 2: Updated with improved saving. Let's reload the checkpoint and start at iteration 4000. If we use 4XH100. To finish training we'd need only 18k iterations here, but I needed to reduce batch_size = 18, so we're back up to needing 22k iterations. However I only got through ~500 iterations because I'm in a coffee shop with bad internet connection. Trained 147,456,000 tokens (~147.5M), cumulative ~868.4M, ~9.13B to go (id = 46acw8eb). [actually 73M tokens]
 
-Session 3: 4500 starting, 10000 ending, batch_size 18 and 4 GPUs. Trained 1,622,016,000 tokens (~1.62B), cumulative ~2.49B, ~7.51B to go (id = carxia2m)
+Session 3: 4500 starting, 10000 ending, batch_size 18 and 4 GPUs. Trained 1,622,016,000 tokens (~1.62B), cumulative ~2.49B, ~7.51B to go (id = carxia2m). [actually 811M tokens]
 
-Session 4: starting 10000, batch_size 18 and 4 GPUs, ended 16500. Trained 1,916,928,000 tokens (~1.92B), cumulative ~4.41B, ~5.59B to go (id = 56c2n5c6)
+Session 4: starting 10000, batch_size 18 and 4 GPUs, ended 16500. Trained 1,916,928,000 tokens (~1.92B), cumulative ~4.41B, ~5.59B to go (id = 56c2n5c6). [actually 958M tokens]
 
-Session 5: started 16500 ended checkpoint_35800.pt (iteration 35800), batch_size 18 and 4 GPUs (id = iec3w33j). Trained 5,689,344,000 tokens (~5.69B), cumulative ~10.10B, COMPLETED! I was at Trees Bar near Park Slope enjoying Wine Wednesdays after PPTC run club and got to watch my child (who I have named ZAC-GPT) learn how to say full sentences!
+Session 5: started 16500 ended checkpoint_35800.pt (iteration 35800), batch_size 18 and 4 GPUs (id = iec3w33j). Trained 5,689,344,000 tokens (~5.69B), cumulative ~10.10B, COMPLETED! I was at Trees Bar near Park Slope enjoying Wine Wednesdays after PPTC run club and got to watch my child (who I have named ZAC-GPT) learn how to say full sentences! [actually 2.8B tokens]
 
-Session 6: Okay so I deleted iec3w33j by accident so let's restart at 56c2n5c6, which starts at iteration 16500 with batch_size 18 on 4 GPUs and ended at iteration 38200 (id = j651hrgg). Trained 6,394,368,000 tokens (~6.39B), cumulative ~10.80B, COMPLETED for ZAC-GPT-2 (with extra tokens for good measure)!
+Session 6: Okay so I deleted iec3w33j by accident so let's restart at 56c2n5c6, which starts at iteration 16500 with batch_size 18 on 4 GPUs and ended at iteration 38200 (id = j651hrgg). Trained 6,394,368,000 tokens (~6.39B), cumulative ~10.80B, COMPLETED for ZAC-GPT-2 (with extra tokens for good measure)! [actually 3.2B tokens]
 
 Absolutley facinating observations by the end. The LLM goes from random words (due to random weights), to most common words (often "the") after a few hundred iterations, to slowly being able to form larger sentences (~10000 iterations) and paragraphs (~30000 iterations). I knew that pre-training would be helpful for spelling, grammar, and basic sentence construction, but running a set of world knowledge tasks on them I get these results: 
 
@@ -105,11 +103,29 @@ The paradigm here is only having training and validation. We hold out a parquet 
 
 Session 1: With pre-training done let's test out mid-training (I know K ended up removing mid-training but whatever this is fun). The major changes here are (i) introducing special tokens (BOS, roles) and (ii) training on conversational data. I'm going to use 30% FineWebEdu  (same data as pre-training) and 70% mix of SmolTalk (synthetic multi-turn QA in technical domains) and UltaChatGen (synthetic dialogue and currated discussions). Goal is to hit 5B tokens with this distribution so with batch_size 18 and 4XH100 GPUs that's ~20k iterations (id = pu94vo4r).
 
-Session 2: Something I realized during training was the CORE metric was both very noisy and not increasing much. I originally took this as due to high learning rate, but realized (i) few sequences were making up the CORE metric and (ii) I was padding, and not packing, the mid-training data. Playing around with more complex QA and knowledge checks it gets the sentence structure and flavor of the answer, but hardly the exact answer. Let's try this again. If we still want to get to 5B mid-training tokens, previous session was really ~50%, so we have to do another 2.5B, or 10k iterations of the new packed dataset.
+Session 2: Something I realized during training was the CORE metric was both very noisy and not increasing much. I originally took this as due to high learning rate, but realized (i) few sequences were making up the CORE metric and (ii) I was padding, and not packing, the mid-training data. Playing around with more complex QA and knowledge checks it gets the sentence structure and flavor of the answer, but hardly the exact answer. Let's try this again. If we still want to get to 5B mid-training tokens, previous session was really ~50%, so we have to do another 2.5B, or 10k iterations of the new packed dataset (id = 771w9gdd).
 
 To fetch do the following:
 
-scp -r -P 18650 -i ~/.ssh/id_ed25519 root@216.243.220.216:/workspace/project-llm-chat/logs/pu94vo4r/ /home/zaccosenza/code/project-llm-chat/logs/pu94vo4r/
+scp -r -P 18650 -i ~/.ssh/id_ed25519 root@216.243.220.216:/workspace/project-llm-chat/logs/771w9gdd/ /home/zaccosenza/code/project-llm-chat/logs/771w9gdd/
+
+# Some mess ups and prep for SFT
+
+I noticed some things that give me pause for the next phase of training: 
+
+(1) re-reading some documentation on K's repo I noticed he says 350 shards are needed for pre-training on 10B tokens. I did some sampling of the FineWebEdu dataset and get ~56M tokens/shard, so to get 10B tokens I need 178 shards. I re-checked my notes and got the same answer, but checking the server I only had 100 shards downloaded. This might explain why my CORE score was 0.19 despite passing through mid-training. Also it turns out I was not accounting for grad_accmulation = max(1, 4 // world_size). With world_size = 4 I underestimated the number of tokens per iteration, so pre-training I really only trained on ~6.2B tokens and mid-training I really only trained on ~3B tokens. Lession learned, be very detailed in the training dataset sizes to match expected specs! 
+
+(2) Chatting with 771w9gdd I noticed it (i) lies, (ii) runs on too long and (iii) mimics the user tokens. I could be wrong, but it seems to me that at minimum (ii) and (iii) could be solved with SFT and RLHF. (i) might be solved by going back and re-pre/mid-training. Seeing as this is expensive, we've learned a lot about large-scale training, and I want to start exploring other topics, I think we can start SFT and RLHF. Part of the value of this project was to struggle with these unfamilar topics and actually learn them, rather than rely on perfect vibecoding and other peoples code. 
+
+(3) I have the ability to resume training, but I never exclude already seen shards from training. So while the data is stratified across GPUs and then randomly selected, some data may have been seen beforehand. 
+
+(4) After some re-engineering in preparation for SFT I found that I was appending EOS token to end of entire document, and the default EOS was being appended to the end of rows of text in FineWebEdu. The inductive bias here for EOS will therefore be a weak end-of-the-line signal, rather than a genuine EOS token. However, happily, mid-train was done with assistant-to-user passing, so I can re-purpose user as an EOS token during QA.
+
+I think all together (1) (2) (3) all point to a poor model with low performance due to overfitting on a smaller less diverse distribution of pre-trained data. I'm going to run an experiment to see how much we can recover by solving the above issues. If I don't see a significant drop in validation we might move forward with the mulligan and do some more experiments on our poor dumb little model.
+
+# SFT
+
+
 
 # Infrastructure and multi-GPU setup
 
