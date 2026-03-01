@@ -209,8 +209,12 @@ class PackedStreamingDataset(IterableDataset):
         if self.shuffle:
             random.shuffle(files)
 
-        # Compute which files belong to this shard (avoids infinite cycle on empty shards)
-        my_file_indices = [i for i in range(len(files)) if i % total_shards == shard_id]
+        # Compute which files belong to this shard.
+        # If there are fewer files than shards (e.g. 1-file benchmark datasets with world_size=4),
+        # fall back to modding by the number of files so every rank gets at least one file.
+        effective_shards = min(total_shards, len(files)) if files else total_shards
+        effective_shard_id = shard_id % effective_shards if effective_shards else 0
+        my_file_indices = [i for i in range(len(files)) if i % effective_shards == effective_shard_id]
         if not my_file_indices:
             return
 
@@ -327,11 +331,15 @@ class MixedStreamingDataset(IterableDataset):
             try:
                 yield next(iters[idx])
             except StopIteration:
-                # Sub-dataset exhausted — restart it (PEP 479: StopIteration raised inside
-                # a generator becomes RuntimeError, so we must catch it here explicitly)
+                # Sub-dataset exhausted — restart it. Both yield next() calls must be inside
+                # try/except because PEP 479 converts any StopIteration escaping a generator
+                # into RuntimeError.
                 _, ds = self.datasets_with_names[idx]
                 iters[idx] = iter(ds)
-                yield next(iters[idx])
+                try:
+                    yield next(iters[idx])
+                except StopIteration:
+                    pass  # dataset truly empty, skip this draw
 
 
 # ---- Collate ----
