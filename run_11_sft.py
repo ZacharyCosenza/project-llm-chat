@@ -54,6 +54,13 @@ TRAIN_CONFIGS = {
             'ultrachat_sft': 0.15,
         },
     },
+    'sft-lima': {
+        'peak_lr': 2e-5,
+        'min_lr': 2e-6,
+        'weight_decay': 0.01,
+        'warmup_ratio': 0.05,
+        'datasets': {'lima': 1.0},
+    },
 }
 
 # ---- Datasets ----
@@ -478,6 +485,38 @@ def create_dataloaders(mode_train, tokenizer, batch_size, seq_length,
                 num_workers=num_workers, pin_memory=True
             )
 
+    elif mode_train == 'sft-lima':
+        lima_dir = Path('data/lima_data')
+        lima_files = sorted(lima_dir.glob("*.parquet"))
+        if not lima_files:
+            raise FileNotFoundError("No LIMA parquet files found in data/lima_data/. "
+                                    "Run: python -m core.dataset --lima")
+
+        print0(f"Data: LIMA ({len(lima_files)} file, 100% assistant-only loss)")
+
+        train_dataset = PackedStreamingDataset(
+            lima_files, tokenizer, seq_length, rank=rank, world_size=world_size,
+            shuffle=True, data_format='conversation', source_filter=None,
+            mask_policy='assistant_only',
+        )
+        train_loader = DataLoader(
+            train_dataset, batch_size=batch_size, collate_fn=collate_fn,
+            num_workers=num_workers, pin_memory=True,
+            prefetch_factor=2 if num_workers > 0 else None
+        )
+
+        # Val on the same file (dataset is too small to hold out a separate split)
+        lima_val = PackedStreamingDataset(
+            lima_files, tokenizer, seq_length, rank=0, world_size=1,
+            shuffle=False, max_sequences=val_sequences,
+            data_format='conversation', source_filter=None,
+            mask_policy='assistant_only',
+        )
+        val_loaders['lima'] = DataLoader(
+            lima_val, batch_size=batch_size, collate_fn=collate_fn,
+            num_workers=num_workers, pin_memory=True
+        )
+
     return train_loader, val_loaders
 
 
@@ -810,20 +849,19 @@ def create_optimizer_and_scheduler(model, peak_lr, min_lr, weight_decay, warmup_
 
     return optimizer, scheduler
 
-
 # ---- Main ----
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch_size', type=int, default=18)
-    parser.add_argument('--max_steps', type=int, default=80000)
+    parser.add_argument('--max_steps', type=int, default=80069)
     parser.add_argument('--fast_dev_run', type=int, default=0)
     parser.add_argument('--resume', type=str, default=None)
-    parser.add_argument('--mode', type=str, default='pretrain', choices=['test', 'pretrain', 'midtrain', 'sft'])
+    parser.add_argument('--mode', type=str, default='pretrain', choices=['test', 'pretrain', 'midtrain', 'sft', 'sft-lima'])
     parser.add_argument('--core_examples', type=int, default=500)
     args = parser.parse_args()
 
-    is_training = args.mode in ('pretrain', 'midtrain', 'sft')
+    is_training = args.mode in ('pretrain', 'midtrain', 'sft', 'sft-lima')
     mode_train = args.mode if is_training else 'pretrain'  # test mode uses pretrain config for data
 
     rank, world_size, local_rank = setup_distributed()
@@ -868,7 +906,7 @@ if __name__ == "__main__":
     print0(f"Peak LR: {peak_lr}, Min LR: {min_lr}, Weight decay: {weight_decay}")
     print0(f"Warmup steps: {warmup_steps} ({train_config['warmup_ratio']*100:.1f}% of {max_steps})")
     print0(f"Datasets: {' | '.join(f'{k}={v:.1%}' for k, v in train_config['datasets'].items())}")
-    print0(f"Mask policy: {'assistant_only' if mode_train == 'sft' else 'all'}")
+    print0(f"Mask policy: {'assistant_only' if mode_train in ('sft', 'sft-lima') else 'all'}")
 
     if torch.cuda.is_available():
         device = torch.device(f'cuda:{local_rank}')
@@ -947,7 +985,7 @@ if __name__ == "__main__":
                 "warmup_steps": warmup_steps, "max_steps": max_steps,
                 "use_special_tokens": True,
                 "dataset_mix": train_config['datasets'],
-                "mask_policy": "assistant_only" if mode_train == "sft" else "all",
+                "mask_policy": "assistant_only" if mode_train in ("sft", "sft-lima") else "all",
             }
         )
 
