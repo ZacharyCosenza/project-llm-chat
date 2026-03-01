@@ -102,7 +102,7 @@ Session 2: Something I realized during training was the CORE metric was both ver
 
 To fetch do the following:
 
-scp -r -P 12545 -i ~/.ssh/id_ed25519 root@216.243.220.229:/workspace/project-llm-chat/logs/ieqhwwrl/ /home/zaccosenza/code/project-llm-chat/logs/ieqhwwrl/
+scp -r -P 15085 -i ~/.ssh/id_ed25519 root@216.243.220.220:/workspace/project-llm-chat/logs/7mkc9emw/ /home/zaccosenza/code/project-llm-chat/logs/7mkc9emw/
 
 # Some mess ups and prep for SFT
 
@@ -122,7 +122,7 @@ I think all together (1) (2) (3) all point to a poor model with low performance 
 
 From experiments on conversational data (ultachat and smoltalk) we have ~ 30 + 8 + 7 M tokens / shard * 30 shards = ~1.35B tokens. Assuming 2048 tokens / seq, 18 batch size, 4 GPUs and our logic of accumulate_grad_batches = max(1, 4 // world_size) = 1, I get 8.8k iterations to run through all data in a single epoch. Reading the literature I tend to see SFT being done on basis of number of examples rather than number of tokens, of which we have ~1.4M examples in our datasets. So the question is do we start SFT with many synthetic examples or few high quality examples? The usualy answer is few high quality, but as we've already established, my model is ~40% undertrained, so something inbetween mid-training and SFT might be best here. 
 
-Session 1: trained above model for 10k iterations. Works much better as a conversational agent compared to during mid-training. Looks like the assistant masking worked! I'd like to run a quick fine tune on the LIMA data next.
+Session 1: trained above model for 10k iterations. Works much better as a conversational agent compared to during mid-training. Looks like the assistant masking worked! I'd like to run a quick fine tune on the LIMA data next (id = ieqhwwrl)
 
 Session 2: I also got the LIMA dataset so let's train for 3 epochs. At 683k tokens with ~20% padding that's 683000 / 2048 / (1 GPU) / 18 (batch size) / (1 - 0.2) = 69 iterations.
 

@@ -55,7 +55,7 @@ TRAIN_CONFIGS = {
         },
     },
     'sft-lima': {
-        'peak_lr': 2e-5,
+        'peak_lr': 1e-5,
         'min_lr': 2e-6,
         'weight_decay': 0.01,
         'warmup_ratio': 0.05,
@@ -1040,6 +1040,12 @@ if __name__ == "__main__":
 
     pbar.close()
     print0(f"Training complete at step {global_step}")
+
+    # Always save the final checkpoint, even if training ended between val intervals.
+    # save_checkpoint deletes all prior checkpoints, keeping only this one.
+    save_checkpoint(model, global_step, checkpoint_dir, rank)
+    if world_size > 1:
+        dist.barrier()
 
     if use_wandb:
         wandb.finish()
