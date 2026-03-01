@@ -102,7 +102,7 @@ Session 2: Something I realized during training was the CORE metric was both ver
 
 To fetch do the following:
 
-scp -r -P 15085 -i ~/.ssh/id_ed25519 root@216.243.220.220:/workspace/project-llm-chat/logs/7mkc9emw/ /home/zaccosenza/code/project-llm-chat/logs/7mkc9emw/
+scp -r -P 15085 -i ~/.ssh/id_ed25519 root@216.243.220.220:/workspace/project-llm-chat/logs/w8a44yr1/ /home/zaccosenza/code/project-llm-chat/logs/w8a44yr1/
 
 # Some mess ups and prep for SFT
 
@@ -124,7 +124,11 @@ From experiments on conversational data (ultachat and smoltalk) we have ~ 30 + 8
 
 Session 1: trained above model for 10k iterations. Works much better as a conversational agent compared to during mid-training. Looks like the assistant masking worked! I'd like to run a quick fine tune on the LIMA data next (id = ieqhwwrl)
 
-Session 2: I also got the LIMA dataset so let's train for 3 epochs. At 683k tokens with ~20% padding that's 683000 / 2048 / (1 GPU) / 18 (batch size) / (1 - 0.2) = 69 iterations.
+Session 2: I also got the LIMA dataset so let's train for 3 epochs. At 683k tokens with ~20% padding that's 683000 / 2048 / (1 GPU) / 18 (batch size) / (1 - 0.2) = 69 iterations. (id = w8a44yr1)
+
+Chatting with the model here I can tell it is much more able to hold onto a conversation like a helpful assistant. The assistant masking and SFT must have really helped. ZAC-GPT-2 is still very stupied, making mistakes on basic world knowledge, but I attribute that to mssing ~40% of pre-training due to my token estimation mistake. Going through K's nanochat, I noticed he has several tasks which might be helpful for additional SFT: MMLU and GSM8K. MMLU is a multiple choice exam of 57 topics. Normally it is a task with solutions for an LLM, but I've converted it to a knowledge QA by explosing the answer as assistant token. GSM8K is made up of simple math problems, but posed as multi-step reasoning. This should improve the models baseline reasoning abilities and tool use. The reasoning is not done through special tokens, but calculator use is (through << >>). 
+
+Session 3: bringing in the MMLU train dataset is ~100k conversations at 377 tokens / conversation, estimated padding percentage is 10%, this gives ~20k chunks. If we use batch size 18 and 4 GPUs that means we need 284 iterations / epoch. For GSM8K the train dataset is 7.4k conversations at 153 tokens / conversation, estimated padding percentage is 4% (lower because the conservations are smaller), this gives about 575 chunks. Using same batch size and GPUs we'd need 8 iterations / epoch. If we want ~3 epochs for SFT, that makes 852 iterations. If they are mixed in proportion to their number of packed dataloader runs, we get 97% for MMLU and 3% for GSM8K. Let round up to 1k iterations.
 
 # Infrastructure and multi-GPU setup
 

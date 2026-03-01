@@ -61,6 +61,16 @@ TRAIN_CONFIGS = {
         'warmup_ratio': 0.05,
         'datasets': {'lima': 1.0},
     },
+    'sft-benchmark': {
+        'peak_lr': 5e-6,
+        'min_lr': 1e-6,
+        'weight_decay': 0.01,
+        'warmup_ratio': 0.05,
+        'datasets': {
+            'mmlu': 0.97, 
+            'gsm8k': 0.03
+            },
+    },
 }
 
 # ---- Datasets ----
@@ -517,6 +527,70 @@ def create_dataloaders(mode_train, tokenizer, batch_size, seq_length,
             num_workers=num_workers, pin_memory=True
         )
 
+    elif mode_train == 'sft-benchmark':
+        mmlu_dir   = Path('data/mmlu_data')
+        gsm8k_dir  = Path('data/gsm8k_data')
+        mmlu_train  = sorted(mmlu_dir.glob("train.parquet"))
+        mmlu_test   = sorted(mmlu_dir.glob("test.parquet"))
+        gsm8k_train = sorted(gsm8k_dir.glob("train.parquet"))
+        gsm8k_test  = sorted(gsm8k_dir.glob("test.parquet"))
+
+        missing = []
+        if not mmlu_train:  missing.append("data/mmlu_data/train.parquet  (run: python -m core.dataset --mmlu)")
+        if not gsm8k_train: missing.append("data/gsm8k_data/train.parquet  (run: python -m core.dataset --gsm8k)")
+        if missing:
+            raise FileNotFoundError("Missing benchmark data:\n  " + "\n  ".join(missing))
+
+        print0(f"Data: MMLU train ({len(mmlu_train)} file), GSM8K train ({len(gsm8k_train)} file) "
+               f"— weights {' '.join(f'{k}:{v:.2f}' for k, v in dataset_config.items())}, assistant-only loss")
+
+        mmlu_ds = PackedStreamingDataset(
+            mmlu_train, tokenizer, seq_length, rank=rank, world_size=world_size,
+            shuffle=True, data_format='conversation', source_filter=None,
+            mask_policy='assistant_only',
+        )
+        gsm8k_ds = PackedStreamingDataset(
+            gsm8k_train, tokenizer, seq_length, rank=rank, world_size=world_size,
+            shuffle=True, data_format='conversation', source_filter=None,
+            mask_policy='assistant_only',
+        )
+
+        weights = dataset_config
+        train_dataset = MixedStreamingDataset(
+            [('mmlu', mmlu_ds), ('gsm8k', gsm8k_ds)],
+            probabilities=[weights['mmlu'], weights['gsm8k']],
+            rank=rank,
+        )
+        train_loader = DataLoader(
+            train_dataset, batch_size=batch_size, collate_fn=collate_fn,
+            num_workers=num_workers, pin_memory=True,
+            prefetch_factor=2 if num_workers > 0 else None
+        )
+
+        # Val: held-out test splits for both datasets
+        if mmlu_test:
+            mmlu_val = PackedStreamingDataset(
+                mmlu_test, tokenizer, seq_length, rank=0, world_size=1,
+                shuffle=False, max_sequences=val_sequences // 2,
+                data_format='conversation', source_filter=None,
+                mask_policy='assistant_only',
+            )
+            val_loaders['mmlu'] = DataLoader(
+                mmlu_val, batch_size=batch_size, collate_fn=collate_fn,
+                num_workers=num_workers, pin_memory=True
+            )
+        if gsm8k_test:
+            gsm8k_val = PackedStreamingDataset(
+                gsm8k_test, tokenizer, seq_length, rank=0, world_size=1,
+                shuffle=False, max_sequences=val_sequences // 2,
+                data_format='conversation', source_filter=None,
+                mask_policy='assistant_only',
+            )
+            val_loaders['gsm8k'] = DataLoader(
+                gsm8k_val, batch_size=batch_size, collate_fn=collate_fn,
+                num_workers=num_workers, pin_memory=True
+            )
+
     return train_loader, val_loaders
 
 
@@ -854,14 +928,14 @@ def create_optimizer_and_scheduler(model, peak_lr, min_lr, weight_decay, warmup_
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch_size', type=int, default=18)
-    parser.add_argument('--max_steps', type=int, default=80069)
+    parser.add_argument('--max_steps', type=int, default=81000)
     parser.add_argument('--fast_dev_run', type=int, default=0)
     parser.add_argument('--resume', type=str, default=None)
-    parser.add_argument('--mode', type=str, default='pretrain', choices=['test', 'pretrain', 'midtrain', 'sft', 'sft-lima'])
+    parser.add_argument('--mode', type=str, default='pretrain', choices=['test', 'pretrain', 'midtrain', 'sft', 'sft-lima', 'sft-benchmark'])
     parser.add_argument('--core_examples', type=int, default=500)
     args = parser.parse_args()
 
-    is_training = args.mode in ('pretrain', 'midtrain', 'sft', 'sft-lima')
+    is_training = args.mode in ('pretrain', 'midtrain', 'sft', 'sft-lima', 'sft-benchmark')
     mode_train = args.mode if is_training else 'pretrain'  # test mode uses pretrain config for data
 
     rank, world_size, local_rank = setup_distributed()
@@ -906,7 +980,7 @@ if __name__ == "__main__":
     print0(f"Peak LR: {peak_lr}, Min LR: {min_lr}, Weight decay: {weight_decay}")
     print0(f"Warmup steps: {warmup_steps} ({train_config['warmup_ratio']*100:.1f}% of {max_steps})")
     print0(f"Datasets: {' | '.join(f'{k}={v:.1%}' for k, v in train_config['datasets'].items())}")
-    print0(f"Mask policy: {'assistant_only' if mode_train in ('sft', 'sft-lima') else 'all'}")
+    print0(f"Mask policy: {'assistant_only' if mode_train in ('sft', 'sft-lima', 'sft-benchmark') else 'all'}")
 
     if torch.cuda.is_available():
         device = torch.device(f'cuda:{local_rank}')
