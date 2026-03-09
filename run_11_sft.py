@@ -67,9 +67,16 @@ TRAIN_CONFIGS = {
         'weight_decay': 0.01,
         'warmup_ratio': 0.05,
         'datasets': {
-            'mmlu': 0.97, 
+            'mmlu': 0.97,
             'gsm8k': 0.03
             },
+    },
+    'sft-topic-switch': {
+        'peak_lr': 1e-5,
+        'min_lr': 2e-6,
+        'weight_decay': 0.01,
+        'warmup_ratio': 0.05,
+        'datasets': {'topic_switch': 1.0},
     },
 }
 
@@ -599,6 +606,40 @@ def create_dataloaders(mode_train, tokenizer, batch_size, seq_length,
                 num_workers=num_workers, pin_memory=True
             )
 
+    elif mode_train == 'sft-topic-switch':
+        ts_dir = Path('data/topic_switch_data')
+        ts_files = sorted(ts_dir.glob("*.parquet"))
+        if not ts_files:
+            raise FileNotFoundError("No topic-switch parquet files found in data/topic_switch_data/. "
+                                    "Run: python -m core.dataset --topic-switch")
+        # First shard → val, rest → train. If only one shard, use it for both.
+        ts_val_files   = ts_files[:1]
+        ts_train_files = ts_files[1:] if len(ts_files) > 1 else ts_files
+
+        print0(f"Data: topic-switch ({len(ts_train_files)} train shard(s), {len(ts_val_files)} val shard(s), assistant-only loss)")
+
+        train_dataset = PackedStreamingDataset(
+            ts_train_files, tokenizer, seq_length, rank=rank, world_size=world_size,
+            shuffle=True, data_format='conversation', source_filter=None,
+            mask_policy='assistant_only',
+        )
+        train_loader = DataLoader(
+            train_dataset, batch_size=batch_size, collate_fn=collate_fn,
+            num_workers=num_workers, pin_memory=True,
+            prefetch_factor=2 if num_workers > 0 else None
+        )
+
+        ts_val = PackedStreamingDataset(
+            ts_val_files, tokenizer, seq_length, rank=0, world_size=1,
+            shuffle=False, max_sequences=val_sequences,
+            data_format='conversation', source_filter=None,
+            mask_policy='assistant_only',
+        )
+        val_loaders['topic_switch'] = DataLoader(
+            ts_val, batch_size=batch_size, collate_fn=collate_fn,
+            num_workers=num_workers, pin_memory=True
+        )
+
     return train_loader, val_loaders
 
 
@@ -939,11 +980,11 @@ if __name__ == "__main__":
     parser.add_argument('--max_steps', type=int, default=81000)
     parser.add_argument('--fast_dev_run', type=int, default=0)
     parser.add_argument('--resume', type=str, default=None)
-    parser.add_argument('--mode', type=str, default='pretrain', choices=['test', 'pretrain', 'midtrain', 'sft', 'sft-lima', 'sft-benchmark'])
+    parser.add_argument('--mode', type=str, default='pretrain', choices=['test', 'pretrain', 'midtrain', 'sft', 'sft-lima', 'sft-benchmark', 'sft-topic-switch'])
     parser.add_argument('--core_examples', type=int, default=500)
     args = parser.parse_args()
 
-    is_training = args.mode in ('pretrain', 'midtrain', 'sft', 'sft-lima', 'sft-benchmark')
+    is_training = args.mode in ('pretrain', 'midtrain', 'sft', 'sft-lima', 'sft-benchmark', 'sft-topic-switch')
     mode_train = args.mode if is_training else 'pretrain'  # test mode uses pretrain config for data
 
     rank, world_size, local_rank = setup_distributed()
@@ -988,7 +1029,7 @@ if __name__ == "__main__":
     print0(f"Peak LR: {peak_lr}, Min LR: {min_lr}, Weight decay: {weight_decay}")
     print0(f"Warmup steps: {warmup_steps} ({train_config['warmup_ratio']*100:.1f}% of {max_steps})")
     print0(f"Datasets: {' | '.join(f'{k}={v:.1%}' for k, v in train_config['datasets'].items())}")
-    print0(f"Mask policy: {'assistant_only' if mode_train in ('sft', 'sft-lima', 'sft-benchmark') else 'all'}")
+    print0(f"Mask policy: {'assistant_only' if mode_train in ('sft', 'sft-lima', 'sft-benchmark', 'sft-topic-switch') else 'all'}")
 
     if torch.cuda.is_available():
         device = torch.device(f'cuda:{local_rank}')
@@ -1067,7 +1108,7 @@ if __name__ == "__main__":
                 "warmup_steps": warmup_steps, "max_steps": max_steps,
                 "use_special_tokens": True,
                 "dataset_mix": train_config['datasets'],
-                "mask_policy": "assistant_only" if mode_train in ("sft", "sft-lima") else "all",
+                "mask_policy": "assistant_only" if mode_train in ("sft", "sft-lima", "sft-benchmark", "sft-topic-switch") else "all",
             }
         )
 

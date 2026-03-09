@@ -383,6 +383,269 @@ def download_gsm8k():
     return True
 
 
+CUSTOM_DATA_DIR = os.path.join(_SCRIPT_DIR, '..', 'data', 'custom_data')
+TOPIC_SWITCH_DATA_DIR = os.path.join(_SCRIPT_DIR, '..', 'data', 'topic_switch_data')
+
+# p_sample weights for each source in the topic-switch dataset.
+# Uniform by default; adjust to oversample/undersample specific sources.
+TOPIC_SWITCH_P_SAMPLE = {'mmlu': 1/3, 'gsm8k': 1/3, 'smoltalk': 1/3}
+
+
+def _ts_load_conversations(paths, source_filter=None):
+    """Load messages lists from parquet files, optionally filtering by 'source' column."""
+    out = []
+    for path in paths:
+        pf = pq.ParquetFile(path)
+        cols = ['messages', 'source'] if source_filter else ['messages']
+        for rg_idx in range(pf.metadata.num_row_groups):
+            table = pf.read_row_group(rg_idx, columns=cols)
+            msgs_list = table['messages'].to_pylist()
+            if source_filter:
+                src_list = table['source'].to_pylist()
+                for msgs, src in zip(msgs_list, src_list):
+                    if src == source_filter:
+                        out.append(msgs)
+            else:
+                out.extend(msgs_list)
+    return out
+
+
+def _ts_strip_trailing_empty_user(messages):
+    """Remove the trailing empty user turn used as a turn-end signal in MMLU/GSM8K."""
+    if messages and messages[-1]['role'] == 'user' and messages[-1]['content'] == '':
+        return messages[:-1]
+    return messages
+
+
+def _ts_get_ua_pairs(messages):
+    """Extract (user_msg, assistant_msg) pairs from a conversation, skipping system turns."""
+    turns = [m for m in messages if m['role'] != 'system']
+    pairs = []
+    for i in range(0, len(turns) - 1, 2):
+        if turns[i]['role'] == 'user' and turns[i + 1]['role'] == 'assistant':
+            pairs.append((turns[i], turns[i + 1]))
+    return pairs
+
+
+def _ts_estimate_tokens(messages):
+    """Rough token estimate: ~4 chars/token + 1 role token per message + 2 (BOS + EOS)."""
+    return sum(max(1, len(m['content']) // 4) + 1 for m in messages) + 2
+
+
+def _ts_flush_shard(rows, output_dir, shard_idx):
+    from datasets import Dataset
+    path = os.path.join(output_dir, f"shard_{shard_idx:05d}.parquet")
+    Dataset.from_list(rows).to_parquet(path)
+    print(f"  Saved shard_{shard_idx:05d}.parquet ({len(rows)} rows)")
+
+
+def generate_topic_switch_dataset(
+    num_conversations=100_000,
+    p_resume=0.5,
+    p_sample=None,
+    p_system_prompt=0.5,
+    seq_length=2048,
+    seed=42,
+):
+    """Generate a topic-switching SFT dataset mixing MMLU, GSM8K, and SmolTalk.
+
+    Each generated conversation is drawn from a single source (selected by p_sample).
+    Turns come from different conversations within that source to teach topic switching.
+    p_resume is the probability of continuing with the next turn from the current
+    source conversation; (1 - p_resume) causes a switch to a new one.
+
+    System prompt is either "You are a helpful assistant." or absent, chosen randomly
+    with probability p_system_prompt per conversation.
+
+    Output: data/topic_switch_data/shard_*.parquet
+    Schema: messages (list of {role, content}), source='topic_switch'
+    Compatible with PackedStreamingDataset(data_format='conversation').
+    """
+    random.seed(seed)
+
+    if p_sample is None:
+        p_sample = TOPIC_SWITCH_P_SAMPLE.copy()
+
+    sources = list(p_sample.keys())
+    total_weight = sum(p_sample.values())
+    weights = [p_sample[s] / total_weight for s in sources]
+
+    # --- Load source pools ---
+    print("Loading source conversation pools...")
+    source_pools = {}
+
+    if 'mmlu' in sources:
+        raw = _ts_load_conversations([os.path.join(MMLU_DATA_DIR, 'train.parquet')])
+        source_pools['mmlu'] = [_ts_strip_trailing_empty_user(m) for m in raw if m]
+        print(f"  MMLU: {len(source_pools['mmlu'])} conversations")
+
+    if 'gsm8k' in sources:
+        raw = _ts_load_conversations([os.path.join(GSM8K_DATA_DIR, 'train.parquet')])
+        source_pools['gsm8k'] = [_ts_strip_trailing_empty_user(m) for m in raw if m]
+        print(f"  GSM8K: {len(source_pools['gsm8k'])} conversations")
+
+    if 'smoltalk' in sources:
+        conv_paths = sorted(
+            os.path.join(CONVERSATION_DATA_DIR, f)
+            for f in os.listdir(CONVERSATION_DATA_DIR)
+            if f.endswith('.parquet') and not f.endswith('.tmp')
+        )
+        raw = _ts_load_conversations(conv_paths, source_filter='smoltalk')
+        source_pools['smoltalk'] = raw
+        print(f"  SmolTalk: {len(source_pools['smoltalk'])} conversations")
+
+    output_dir = os.path.abspath(TOPIC_SWITCH_DATA_DIR)
+    os.makedirs(output_dir, exist_ok=True)
+    print(f"Generating {num_conversations} conversations → {output_dir}")
+
+    rows = []
+    shard_idx = 0
+
+    for conv_i in range(num_conversations):
+        source = random.choices(sources, weights=weights, k=1)[0]
+        pool = source_pools[source]
+
+        messages = []
+        if random.random() < p_system_prompt:
+            messages.append({'role': 'system', 'content': 'You are a helpful assistant.'})
+
+        # Seed the first source conversation
+        curr_conv = random.choice(pool)
+        curr_pairs = _ts_get_ua_pairs(curr_conv)
+        pair_idx = 0
+
+        while True:
+            # Replenish if current conversation is exhausted
+            while pair_idx >= len(curr_pairs):
+                curr_conv = random.choice(pool)
+                curr_pairs = _ts_get_ua_pairs(curr_conv)
+                pair_idx = 0
+
+            user_msg, asst_msg = curr_pairs[pair_idx]
+            pair_idx += 1
+
+            # Stop if next pair would exceed the token budget
+            if _ts_estimate_tokens(messages + [user_msg, asst_msg]) > seq_length:
+                break
+
+            messages.append(user_msg)
+            messages.append(asst_msg)
+
+            # p_resume: continue with next pair, or switch to a new conversation
+            if random.random() >= p_resume:
+                curr_conv = random.choice(pool)
+                curr_pairs = _ts_get_ua_pairs(curr_conv)
+                pair_idx = 0
+
+        # Guard: skip if no turns were generated (can only happen if a single pair > budget)
+        if not any(m['role'] == 'assistant' for m in messages):
+            continue
+
+        rows.append({'messages': messages, 'source': 'topic_switch'})
+
+        if len(rows) >= SHARD_SIZE:
+            _ts_flush_shard(rows, output_dir, shard_idx)
+            shard_idx += 1
+            rows = []
+
+        if (conv_i + 1) % 10_000 == 0:
+            print(f"  {conv_i + 1}/{num_conversations} generated")
+
+    if rows:
+        _ts_flush_shard(rows, output_dir, shard_idx)
+
+    print(f"Done! {num_conversations} conversations saved to {output_dir}")
+
+def ingest_custom(json_path, source_name='custom'):
+    """Convert a JSON conversation file to parquet for SFT training.
+
+    Input format — a JSON array of conversation objects:
+
+        [
+          {
+            "system": "Optional system prompt.",   ← optional
+            "messages": [
+              ["u", "User turn text"],
+              ["a", "Assistant turn text"],
+              ...
+            ]
+          },
+          ...
+        ]
+
+    Role codes: "u" = user, "a" = assistant.
+    Rules enforced:
+      - messages must be a non-empty list of ["u"|"a", text] pairs
+      - first message must be "u" (user)
+      - last message must be "a" (assistant)
+      - roles must strictly alternate u/a
+    Output: data/custom_data/{source_name}.parquet
+    """
+    import json
+    from datasets import Dataset
+
+    ROLE_MAP = {'u': 'user', 'a': 'assistant'}
+
+    custom_dir = os.path.abspath(CUSTOM_DATA_DIR)
+    os.makedirs(custom_dir, exist_ok=True)
+    out_path = os.path.join(custom_dir, f"{source_name}.parquet")
+
+    with open(json_path) as f:
+        data = json.load(f)
+
+    if not isinstance(data, list):
+        raise ValueError("JSON file must contain a top-level array of conversation objects.")
+
+    rows, skipped = [], 0
+    for i, conv in enumerate(data, 1):
+        tag = f"[conv {i}]"
+
+        sys_content = conv.get('system', '').strip()
+        raw_msgs = conv.get('messages', [])
+
+        if not raw_msgs:
+            print(f"  {tag} empty messages — skipped")
+            skipped += 1; continue
+
+        # Validate and expand
+        ok = True
+        messages = []
+        if sys_content:
+            messages.append({"role": "system", "content": sys_content})
+
+        prev_role = None
+        for j, item in enumerate(raw_msgs):
+            if not (isinstance(item, list) and len(item) == 2 and item[0] in ROLE_MAP):
+                print(f"  {tag} message {j+1}: expected [\"u\"|\"a\", text] — skipped")
+                ok = False; break
+            role = ROLE_MAP[item[0]]
+            if prev_role == role:
+                print(f"  {tag} message {j+1}: consecutive '{role}' turns — skipped")
+                ok = False; break
+            messages.append({"role": role, "content": str(item[1])})
+            prev_role = role
+
+        if not ok:
+            skipped += 1; continue
+
+        user_asst = [m for m in messages if m['role'] != 'system']
+        if not user_asst or user_asst[0]['role'] != 'user':
+            print(f"  {tag} first non-system message must be 'u' — skipped")
+            skipped += 1; continue
+        if user_asst[-1]['role'] != 'assistant':
+            print(f"  {tag} last message must be 'a' — skipped")
+            skipped += 1; continue
+
+        rows.append({"messages": messages, "source": source_name})
+
+    if not rows:
+        raise ValueError(f"No valid conversations found in {json_path}")
+
+    Dataset.from_list(rows).to_parquet(out_path)
+    print(f"  Saved {len(rows)} conversations ({skipped} skipped) → {out_path}")
+    return True
+
+
 HUMANEVAL_DATA_DIR = os.path.join(_SCRIPT_DIR, '..', 'data', 'humaneval_data')
 
 def download_humaneval():
@@ -502,9 +765,19 @@ if __name__ == "__main__":
                         help="Download GSM8K math reasoning dataset (~8K train, ~1.3K test)")
     parser.add_argument("--humaneval", action="store_true",
                         help="Download HumanEval coding benchmark (164 problems, eval only)")
+    parser.add_argument("--custom", metavar="JSON_PATH",
+                        help="Ingest a JSON conversation file into data/custom_data/")
+    parser.add_argument("--source", default="custom",
+                        help="Source name tag written to the 'source' column (default: 'custom')")
+    parser.add_argument("--topic-switch", action="store_true",
+                        help="Generate topic-switching SFT dataset (MMLU + GSM8K + SmolTalk, 100K conversations)")
     args = parser.parse_args()
 
-    if args.lima:
+    if args.topic_switch:
+        generate_topic_switch_dataset()
+    elif args.custom:
+        ingest_custom(args.custom, source_name=args.source)
+    elif args.lima:
         download_lima()
     elif args.mmlu:
         download_mmlu()

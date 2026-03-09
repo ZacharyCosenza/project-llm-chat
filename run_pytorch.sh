@@ -19,4 +19,4 @@ echo "============================================"
 echo "ZAC-GPT-2 - ${N_GPUS} GPU(s)"
 echo "============================================"
 
-torchrun --standalone --nproc_per_node="$N_GPUS" "${SCRIPT_DIR}/run_11_sft.py" --resume logs/w8a44yr1/checkpoints/checkpoint_80069.pt --mode sft-benchmark
+torchrun --standalone --nproc_per_node="$N_GPUS" "${SCRIPT_DIR}/run_11_sft.py" --resume logs/7gfvtan7/checkpoints/checkpoint_81000.pt --mode sft-topic-switch

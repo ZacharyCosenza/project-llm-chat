@@ -5,7 +5,7 @@ from transformers import AutoTokenizer
 from core.models import TinyGPT
 
 # --- Preset configuration ---
-CHECKPOINT_PATH = '/home/zaccosenza/code/project-llm-chat/logs/w8a44yr1/checkpoints/checkpoint_80069.pt'
+CHECKPOINT_PATH = '/home/zaccosenza/code/project-llm-chat/logs/7gfvtan7/checkpoints/checkpoint_81000.pt'
 N_LAYERS = 20
 DIM = N_LAYERS * 64          # 1280
 N_HEADS = max(1, (DIM + 127) // 128)  # 10
@@ -15,7 +15,7 @@ TEMPERATURE = 0.8
 TOP_K = 40
 MAX_NEW_TOKENS = 300
 
-SYSTEM_PROMPT = 'You are a helpful assistant.'  # Optional default system prompt (empty = no system turn)
+SYSTEM_PROMPT = 'You are an expert assistant.'  # Optional default system prompt (empty = no system turn)
 
 def _get_device():
     if torch.cuda.is_available():
@@ -81,7 +81,20 @@ def _generate(model, prompt_ids, device, stop_ids):
     return idx[0, prompt_ids.size(1):].tolist()
 
 
+_BOT_BANNER = (
+    "\033[7m"           # reverse video (inherit terminal bg)
+    "      ●      \n"
+    "      │      \n"
+    "   ┌─────┐   \n"
+    "   │ ◉ ◉ │   \n"
+    "   │  ‿  │   \n"
+    "   └─────┘   "
+    "\033[0m"
+    "  ZAC-GPT-2\n"
+)
+
 def chat():
+    print(_BOT_BANNER)
     device = _get_device()
     print(f'Loading model on {device}...')
     model, tokenizer = _load(device)

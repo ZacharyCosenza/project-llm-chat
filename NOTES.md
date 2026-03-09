@@ -102,7 +102,7 @@ Session 2: Something I realized during training was the CORE metric was both ver
 
 To fetch do the following:
 
-scp -r -P 15085 -i ~/.ssh/id_ed25519 root@216.243.220.220:/workspace/project-llm-chat/logs/w8a44yr1/ /home/zaccosenza/code/project-llm-chat/logs/w8a44yr1/
+scp -r -P 10977 -i ~/.ssh/id_ed25519 root@216.243.220.216:/workspace/project-llm-chat/logs/7gfvtan7/ /home/zaccosenza/code/project-llm-chat/logs/7gfvtan7/
 
 # Some mess ups and prep for SFT
 
@@ -128,7 +128,48 @@ Session 2: I also got the LIMA dataset so let's train for 3 epochs. At 683k toke
 
 Chatting with the model here I can tell it is much more able to hold onto a conversation like a helpful assistant. The assistant masking and SFT must have really helped. ZAC-GPT-2 is still very stupied, making mistakes on basic world knowledge, but I attribute that to mssing ~40% of pre-training due to my token estimation mistake. Going through K's nanochat, I noticed he has several tasks which might be helpful for additional SFT: MMLU and GSM8K. MMLU is a multiple choice exam of 57 topics. Normally it is a task with solutions for an LLM, but I've converted it to a knowledge QA by explosing the answer as assistant token. GSM8K is made up of simple math problems, but posed as multi-step reasoning. This should improve the models baseline reasoning abilities and tool use. The reasoning is not done through special tokens, but calculator use is (through << >>). 
 
-Session 3: bringing in the MMLU train dataset is ~100k conversations at 377 tokens / conversation, estimated padding percentage is 10%, this gives ~20k chunks. If we use batch size 18 and 4 GPUs that means we need 284 iterations / epoch. For GSM8K the train dataset is 7.4k conversations at 153 tokens / conversation, estimated padding percentage is 4% (lower because the conservations are smaller), this gives about 575 chunks. Using same batch size and GPUs we'd need 8 iterations / epoch. If we want ~3 epochs for SFT, that makes 852 iterations. If they are mixed in proportion to their number of packed dataloader runs, we get 97% for MMLU and 3% for GSM8K. Let round up to 1k iterations.
+Session 3: bringing in the MMLU train dataset is ~100k conversations at 377 tokens / conversation, estimated padding percentage is 10%, this gives ~20k chunks. If we use batch size 18 and 4 GPUs that means we need 284 iterations / epoch. For GSM8K the train dataset is 7.4k conversations at 153 tokens / conversation, estimated padding percentage is 4% (lower because the conservations are smaller), this gives about 575 chunks. Using same batch size and GPUs we'd need 8 iterations / epoch. If we want ~3 epochs for SFT, that makes 852 iterations. If they are mixed in proportion to their number of packed dataloader runs, we get 97% for MMLU and 3% for GSM8K. Let round up to 1k iterations. (id = 7gfvtan7).
+
+# Fixing post-SFT things
+
+Playing with 7gfvtan7 is so fun. It's so dumb you can clearly see the lack of pre-training tokens (world knowledge is bad). Also I am not totally sure that our mid-training did not screw up the model even more. K ended up removing mid-training after implementing a BOS aligned dataloader, whereas ZAC-GPT-2 was exposed to 2.5B tokens in mid-train convservational logs, so sometimes it repeats queries back to you. This could be something it learned during mid-training when I backpropagated system and user token losses. 
+
+Two areas we might try to fix are (1) the model has trouble switching themes and (2) the model has a tendency to repeat itself (I don't care about world knowledge, pre-training is too expensive and boring). For (1), an example might be the following: 
+
+You: What is the capital of France?
+Assistant: The capital of France is Paris.
+You: What is the capital of Germany?
+Assistant: The capital of Germany is Berlin.
+
+You: Write a short poem about a car.
+Assistant: In twilight's glow, I gaze upon my car,
+A car my soul, I hope, I'll never forget.
+I take a break from its routine,
+And stroll along the driveway,
+A car I'm sure will never forget.
+A car I love, a car I'll never forget,
+A car that will always be mine.
+You: What is the capital of Germany?
+Assistant: In twilight's glow, I gaze upon my car,
+A car my soul, I hope, I'll never forget.
+
+I wonder if the model was exposed to enough conversations with topic and theme switching.
+
+For (2), it's pretty obvious
+
+You: Write a short poem about a boat.
+Assistant: In the depths of its green heart,
+A boat that moves with grace,
+A city's spirit moves with grace,
+A boat that moves with grace,
+A boat that moves with grace,
+A boat that moves with grace,
+A boat that moves with grace,
+A boat that moves with grace,
+
+I put together a dataset that uses our previous conversational datasets but does topic switching. Going back and forth with Claude it's actually hard to say how many tokens the model needs to see to adhere to certain behavior. I'm thinking that the complexity of the task naturally leads to a notion of the number of tokens needed, but not every token is treated equally. If every example we give is an example of topic switching behavior, that's a high density signal and would require fewer epochs/examples/lower LR. On the other hand, if we are tring to teach a model a more complex behavior with generic data (for example, mathematical reasoning using youtube comments) that's a low density signal so would require large amounts of data (closer to pre-training). The reason I am thinking hard about this is because we are outside of the previous paradigm of having a set of data we want to expose to the model, rather we have unlimited data and need to figure out how to impart behavior. Maybe we should have thought about our prior SFT runs in the same way? Hard to say.
+
+Let's assume, because of the high signal to complexity ratio of this task and dataset, we need 1k examples. Each example is roughly 2048 tokens because of the way we are packing the parquets, so we'd need ~2M tokens. That gives 13 iterations / epoch. Let's go with 7 epochs (this one is straight up coming from Claude). So that's ~100 iterations.
 
 # Infrastructure and multi-GPU setup
 
@@ -151,3 +192,5 @@ The cloud GPU instances I used (RunPod, Lambda) don't have InfiniBand or NVLink 
 Together these flags tell NCCL: "don't try anything fancy, just use sockets over loopback." The tradeoff is some communication overhead vs. NVLink/P2P, but for 4-GPU training the bottleneck is compute not communication, so the impact is negligible.
 
 Using `torchrun --standalone` for single-node multi-GPU. The `--standalone` flag handles the rendezvous internally (no need for a separate etcd or c10d store). Each GPU gets its own process with RANK, WORLD_SIZE, and LOCAL_RANK set automatically.
+
+Reading more into memory (https://huggingface.co/spaces/nanotron/ultrascale-playbook?section=memory_for_activations) seems like if we use mixed precision training (common) then memory for parameters, gradients, optimizers states are 2N, 2N, (4+4)N for N = hv+L(12h^2 + 13h)+2h for hidden size h, vocab size v, number of layers L. We also need to store FP32 parameter master copies 4N. The activations are kinda crazy and scale more like L * seq * B * h * (34 + 5 * n_heads * seq / h) so explains why large batch operations are prone to OOM. 
