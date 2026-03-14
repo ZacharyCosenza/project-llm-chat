@@ -102,7 +102,7 @@ Session 2: Something I realized during training was the CORE metric was both ver
 
 To fetch do the following:
 
-scp -r -P 10977 -i ~/.ssh/id_ed25519 root@216.243.220.216:/workspace/project-llm-chat/logs/7gfvtan7/ /home/zaccosenza/code/project-llm-chat/logs/7gfvtan7/
+scp -r -P 15548 -i ~/.ssh/id_ed25519 root@216.243.220.218:/workspace/project-llm-chat/logs/1oxgs1qn/ /home/zaccosenza/code/project-llm-chat/logs/1oxgs1qn/
 
 # Some mess ups and prep for SFT
 

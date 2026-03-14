@@ -4,6 +4,7 @@ See `repackage_data_reference.py` for dataset preparation details.
 """
 
 import os
+import re
 import time
 import random
 import requests
@@ -747,6 +748,124 @@ def download_eval_bundle():
     print("Failed to download eval bundle")
     return False
 
+ULTRAFEEDBACK_DATA_DIR = os.path.join(_SCRIPT_DIR, '..', 'data', 'ultrafeedback_data')
+HH_RLHF_DATA_DIR       = os.path.join(_SCRIPT_DIR, '..', 'data', 'hh_rlhf_data')
+
+
+def download_ultrafeedback():
+    """Download HuggingFaceH4/ultrafeedback_binarized and save as DPO parquet shards.
+
+    Schema: chosen (list[{role,content}]), rejected (list[{role,content}]), source='ultrafeedback'
+    Split used: train_prefs (~61K examples). chosen/rejected are already in messages format.
+
+    Output: data/ultrafeedback_data/shard_*.parquet
+    """
+    from datasets import load_dataset
+    import pyarrow as pa
+
+    out_dir = os.path.abspath(ULTRAFEEDBACK_DATA_DIR)
+    if os.path.exists(out_dir) and any(f.endswith('.parquet') for f in os.listdir(out_dir)):
+        existing = [f for f in os.listdir(out_dir) if f.endswith('.parquet')]
+        print(f"UltraFeedback already exists at {out_dir} ({len(existing)} shards)")
+        return True
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    print("Downloading HuggingFaceH4/ultrafeedback_binarized (train_prefs)...")
+    ds = load_dataset("HuggingFaceH4/ultrafeedback_binarized", split="train_prefs")
+    print(f"  {len(ds)} preference pairs")
+
+    # Keep only chosen, rejected; add source tag
+    def normalize(row):
+        return {
+            "chosen":   row["chosen"],
+            "rejected": row["rejected"],
+            "source":   "ultrafeedback",
+        }
+
+    ds = ds.map(normalize, remove_columns=ds.column_names, num_proc=4)
+
+    num_shards = (len(ds) + SHARD_SIZE - 1) // SHARD_SIZE
+    for i in range(num_shards):
+        start = i * SHARD_SIZE
+        end   = min(start + SHARD_SIZE, len(ds))
+        shard = ds.select(range(start, end))
+        shard_path = os.path.join(out_dir, f"shard_{i:05d}.parquet")
+        shard.to_parquet(shard_path)
+        print(f"  Saved shard_{i:05d}.parquet ({end - start} rows)")
+
+    print(f"\nDone! {num_shards} shards saved to {out_dir}")
+    return True
+
+
+def _parse_hh_rlhf_text(text):
+    """Parse HH-RLHF raw text into a messages list [{role, content}]."""
+    role_map = {"Human": "user", "Assistant": "assistant"}
+    matches = re.findall(
+        r'\n\n(Human|Assistant): (.*?)(?=\n\n(?:Human|Assistant): |$)',
+        text,
+        re.DOTALL,
+    )
+    return [{"role": role_map[r], "content": c.strip()} for r, c in matches if c.strip()]
+
+
+def download_hh_rlhf():
+    """Download Anthropic/hh-rlhf (helpful + harmless splits) and save as DPO parquet shards.
+
+    Schema: chosen (list[{role,content}]), rejected (list[{role,content}]), source='hh_rlhf'
+    Parses the raw Human/Assistant text format into messages lists.
+    Splits used: helpful-base train + harmless-base train (~86K total).
+
+    Output: data/hh_rlhf_data/shard_*.parquet
+    """
+    from datasets import load_dataset, concatenate_datasets
+    import pyarrow as pa
+
+    out_dir = os.path.abspath(HH_RLHF_DATA_DIR)
+    if os.path.exists(out_dir) and any(f.endswith('.parquet') for f in os.listdir(out_dir)):
+        existing = [f for f in os.listdir(out_dir) if f.endswith('.parquet')]
+        print(f"HH-RLHF already exists at {out_dir} ({len(existing)} shards)")
+        return True
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    print("Downloading Anthropic/hh-rlhf (helpful-base + harmless-base, train)...")
+    helpful  = load_dataset("Anthropic/hh-rlhf", data_dir="helpful-base",  split="train")
+    harmless = load_dataset("Anthropic/hh-rlhf", data_dir="harmless-base", split="train")
+    print(f"  helpful-base: {len(helpful)}  harmless-base: {len(harmless)}")
+
+    combined = concatenate_datasets([helpful, harmless])
+
+    def normalize(row):
+        chosen_msgs   = _parse_hh_rlhf_text(row["chosen"])
+        rejected_msgs = _parse_hh_rlhf_text(row["rejected"])
+        # Skip malformed rows (empty parse)
+        if not chosen_msgs or not rejected_msgs:
+            return {"chosen": None, "rejected": None, "source": "hh_rlhf"}
+        return {
+            "chosen":   chosen_msgs,
+            "rejected": rejected_msgs,
+            "source":   "hh_rlhf",
+        }
+
+    combined = combined.map(normalize, remove_columns=combined.column_names, num_proc=4)
+    # Drop rows where parse failed
+    combined = combined.filter(lambda x: x["chosen"] is not None, num_proc=4)
+    print(f"  {len(combined)} valid pairs after parsing")
+
+    num_shards = (len(combined) + SHARD_SIZE - 1) // SHARD_SIZE
+    for i in range(num_shards):
+        start = i * SHARD_SIZE
+        end   = min(start + SHARD_SIZE, len(combined))
+        shard = combined.select(range(start, end))
+        shard_path = os.path.join(out_dir, f"shard_{i:05d}.parquet")
+        shard.to_parquet(shard_path)
+        print(f"  Saved shard_{i:05d}.parquet ({end - start} rows)")
+
+    print(f"\nDone! {num_shards} shards saved to {out_dir}")
+    return True
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Download FineWeb-Edu shards and/or eval data")
     parser.add_argument("-n", "--num-files", type=int, default=-1,
@@ -771,10 +890,18 @@ if __name__ == "__main__":
                         help="Source name tag written to the 'source' column (default: 'custom')")
     parser.add_argument("--topic-switch", action="store_true",
                         help="Generate topic-switching SFT dataset (MMLU + GSM8K + SmolTalk, 100K conversations)")
+    parser.add_argument("--ultrafeedback", action="store_true",
+                        help="Download UltraFeedback binarized DPO pairs (~61K chosen/rejected pairs)")
+    parser.add_argument("--hh-rlhf", action="store_true",
+                        help="Download Anthropic HH-RLHF DPO pairs (~86K helpful+harmless pairs)")
     args = parser.parse_args()
 
     if args.topic_switch:
         generate_topic_switch_dataset()
+    elif args.ultrafeedback:
+        download_ultrafeedback()
+    elif args.hh_rlhf:
+        download_hh_rlhf()
     elif args.custom:
         ingest_custom(args.custom, source_name=args.source)
     elif args.lima:

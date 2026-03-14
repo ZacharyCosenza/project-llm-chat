@@ -5,7 +5,8 @@ from transformers import AutoTokenizer
 from core.models import TinyGPT
 
 # --- Preset configuration ---
-CHECKPOINT_PATH = '/home/zaccosenza/code/project-llm-chat/logs/7gfvtan7/checkpoints/checkpoint_81000.pt'
+CHECKPOINT_PATH = '/home/zaccosenza/code/project-llm-chat/logs/1oxgs1qn/checkpoints/checkpoint_81100.pt'
+# CHECKPOINT_PATH = '/home/zaccosenza/code/project-llm-chat/logs/7gfvtan7/checkpoints/checkpoint_81000.pt'
 N_LAYERS = 20
 DIM = N_LAYERS * 64          # 1280
 N_HEADS = max(1, (DIM + 127) // 128)  # 10
