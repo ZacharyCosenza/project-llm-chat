@@ -415,12 +415,15 @@ class DPOStreamingDataset(IterableDataset):
     Yields dicts: chosen_ids, chosen_mask, rejected_ids, rejected_mask — all [seq_length].
     Sequences are truncated or right-padded to seq_length with pad_token_id (mask=0).
     """
-    def __init__(self, files, tokenizer, seq_length, rank=0, world_size=1, max_sequences=None):
+    def __init__(self, files, tokenizer, seq_length, rank=0, world_size=1,
+                 split='train', val_fraction=0.1, max_sequences=None):
         self.files = list(files)
         self.tokenizer = tokenizer
         self.seq_length = seq_length
         self.rank = rank
         self.world_size = world_size
+        self.split = split
+        self.val_fraction = val_fraction
         self.max_sequences = max_sequences
         self._pad_id = tokenizer.pad_token_id
         if not self.files:
@@ -450,7 +453,7 @@ class DPOStreamingDataset(IterableDataset):
         if not my_files:
             return
 
-        file_iter = cycle(my_files) if self.max_sequences else iter(my_files)
+        file_iter = cycle(my_files) if self.split == 'train' else iter(my_files)
         sequences_yielded = 0
 
         for shard in file_iter:
@@ -460,6 +463,8 @@ class DPOStreamingDataset(IterableDataset):
                 print0(f'Error loading {shard}: {e}')
                 continue
 
+            split_idx = max(1, int(self.val_fraction * len(rows)))
+            rows = rows[:split_idx] if self.split == 'val' else rows[split_idx:]
             random.shuffle(rows)
 
             for row in rows:
@@ -785,8 +790,9 @@ def create_dpo_dataloaders(mode, batch_size, tokenizer, seq_length, val_sequence
         train_loaders: dict of {source: DataLoader}
         val_loaders:   dict of {source: DataLoader}
 
-    First shard of each dataset is held out for validation; remaining shards are
-    used for training. If only one shard exists, it is used for both.
+    Each shard is split row-wise: first 10% of rows → val, remaining 90% → train.
+    All shards are used for both splits. val_sequences caps how many val examples are
+    evaluated per step (per source).
     """
     config = TRAIN_CONFIGS[mode]
 
@@ -804,18 +810,16 @@ def create_dpo_dataloaders(mode, batch_size, tokenizer, seq_length, val_sequence
                 f'Run: python -m core.dataset --{source.replace("_", "-")}'
             )
 
-        val_shards   = shards[:1]
-        train_shards = shards[1:] if len(shards) > 1 else shards
-
-        print0(f"  DPO {source}: {len(train_shards)} train shards, {len(val_shards)} val shard")
+        print0(f"  DPO {source}: {len(shards)} shards (90% train / 10% val per shard)")
 
         train_loaders[source] = DataLoader(
-            DPOStreamingDataset(train_shards, tokenizer, seq_length, rank=rank, world_size=world_size),
+            DPOStreamingDataset(shards, tokenizer, seq_length, rank=rank, world_size=world_size,
+                                split='train'),
             batch_size=batch_size, num_workers=0
         )
         val_loaders[source] = DataLoader(
-            DPOStreamingDataset(val_shards, tokenizer, seq_length, rank=0, world_size=1,
-                                max_sequences=val_seqs_per_source),
+            DPOStreamingDataset(shards, tokenizer, seq_length, rank=0, world_size=1,
+                                split='val', max_sequences=val_seqs_per_source),
             batch_size=batch_size, num_workers=0
         )
 
