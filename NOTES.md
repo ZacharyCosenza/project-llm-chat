@@ -171,6 +171,14 @@ I put together a dataset that uses our previous conversational datasets but does
 
 Let's assume, because of the high signal to complexity ratio of this task and dataset, we need 1k examples. Each example is roughly 2048 tokens because of the way we are packing the parquets, so we'd need ~2M tokens. That gives 13 iterations / epoch. Let's go with 7 epochs (this one is straight up coming from Claude). So that's ~100 iterations.
 
+# Trying out RLHF
+
+Before we move on, I realized that our cosine and warmup were calculated based on the max_steps, but because we've just been adding onto previous max_steps we are not doing warmup or time-dependent optimization correctly. This was another massive miss on my part and Claude probably didn't catch it because it assumed this script is doing independent training runs every time. It's been fixed to utilize --resume and is fixed.
+
+Now I'd like to try out RLHF. I downloaded UltaFeedBack and HH_RLHF datasets which have positive and negative conversational pairs (mostly 1-2 assistant/user turns). Keeping the loss to assistant tokens only (same masking as SFT) we can take our starting LLM as reference, then learn the updated LLM policy using the standard DPO loss function. I had Claude make a wrapper for the original model, which mostly involved storing a copy of TinyGPT as a non-nn.Module object to be used as a reference later. The DPO dataloader object now outputs a positive and negative pair of ids and masks and, rather than BOS-align pack them with other conversations, keeps them standalone and just pads to the end or concatenates. 
+
+On the training set size, I have 61k UltraFeedback and 86k HH_RLHF examples. To get through 2 epochs of the entire dataset, and knowing each conversational example is not BOS-align packed, we can easily estimation the number of iterations on 4 GPUs and batch size 9 (half of normal batch size of 18 because each example is actually a pair of examples in the LLM) needed as (61 + 86) * 1000 / 4 / 9 * 2 = ~8.2k iterations.
+
 # Infrastructure and multi-GPU setup
 
 Through trial and error on RunPod/Lambda cloud GPU instances, I arrived at a working multi-GPU configuration captured in startup.sh and run_pytorch.sh. These are worth documenting because they represent hours of debugging hangs and crashes.
@@ -194,3 +202,5 @@ Together these flags tell NCCL: "don't try anything fancy, just use sockets over
 Using `torchrun --standalone` for single-node multi-GPU. The `--standalone` flag handles the rendezvous internally (no need for a separate etcd or c10d store). Each GPU gets its own process with RANK, WORLD_SIZE, and LOCAL_RANK set automatically.
 
 Reading more into memory (https://huggingface.co/spaces/nanotron/ultrascale-playbook?section=memory_for_activations) seems like if we use mixed precision training (common) then memory for parameters, gradients, optimizers states are 2N, 2N, (4+4)N for N = hv+L(12h^2 + 13h)+2h for hidden size h, vocab size v, number of layers L. We also need to store FP32 parameter master copies 4N. The activations are kinda crazy and scale more like L * seq * B * h * (34 + 5 * n_heads * seq / h) so explains why large batch operations are prone to OOM. 
+
+Another interresting considering is hardware memory utilization. Activations take up a lot of memory, particularly as sequence length and batch size increase. Flash attention and other gradient checkpointing methods throw away high memory objects like FF layer outputs after forward pass, and during backwards pass recompute them with the remaining objects. The paradigm here is that GPUs are good and computation but bad at memory, so we can just recompute what we need on the fly. Makes sense to me!

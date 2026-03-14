@@ -232,8 +232,8 @@ def download_mmlu():
     all/test: ~14K examples with subject metadata — used for evaluation.
 
     Stored as multiple-choice conversations:
-      user:      "Multiple Choice question: {question}\\n- {A}=A\\n..."
-      assistant: "A"  (single letter)
+      user:      "Multiple Choice question: {question}\\n- {choice_text}=A\\n..."
+      assistant: full text of the correct choice (e.g. "Paris")
     Extra columns: source='mmlu', subject (empty string for auxiliary_train).
 
     Output: data/mmlu_data/train.parquet, data/mmlu_data/test.parquet
