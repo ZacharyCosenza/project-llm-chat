@@ -973,18 +973,20 @@ def compute_loss(logits, labels, loss_mask):
 def get_sequence_logprobs(logits, token_ids, loss_mask):
     """Sum of per-token log probs over masked (assistant) positions.
 
-    logits:    [B, T, V]  float32 logits
+    logits:    [B, T, V]  logits (bfloat16 or float32)
     token_ids: [B, T]     ground-truth token IDs
     loss_mask: [B, T]     1 for assistant positions, 0 elsewhere
-    Returns:   [B]        per-sequence summed log probs
+    Returns:   [B]        per-sequence summed log probs (float32)
     """
-    # Shift: logit at position t predicts token at t+1
     shift_logits = logits[:, :-1, :]          # [B, T-1, V]
     shift_ids = token_ids[:, 1:]              # [B, T-1]
     shift_mask = loss_mask[:, 1:].float()     # [B, T-1]
 
-    log_probs = F.log_softmax(shift_logits, dim=-1)
-    token_log_probs = log_probs.gather(2, shift_ids.unsqueeze(2)).squeeze(2)  # [B, T-1]
+    # Gather the selected token logit then subtract logsumexp — avoids materialising
+    # a full [B, T-1, V] fp32 output tensor (~3.5 GB at batch=9, T=2048, V=50262).
+    token_logits = shift_logits.gather(2, shift_ids.unsqueeze(2)).squeeze(2).float()  # [B, T-1]
+    log_z = torch.logsumexp(shift_logits, dim=-1).float()                             # [B, T-1]
+    token_log_probs = token_logits - log_z                                             # [B, T-1]
 
     return (token_log_probs * shift_mask).sum(dim=1)  # [B]
 
@@ -1004,12 +1006,13 @@ def compute_dpo_loss(policy_logits, ref_logits,
     B = chosen_ids.size(0)
 
     pol_c, pol_r = policy_logits[:B], policy_logits[B:]
-    ref_c, ref_r = ref_logits[:B], ref_logits[B:]
+
+    ref_c_logps = get_sequence_logprobs(ref_logits[:B], chosen_ids, chosen_mask)
+    ref_r_logps = get_sequence_logprobs(ref_logits[B:], rejected_ids, rejected_mask)
+    del ref_logits  # free before policy forward-graph is retained for backward
 
     pol_c_logps = get_sequence_logprobs(pol_c, chosen_ids, chosen_mask)
     pol_r_logps = get_sequence_logprobs(pol_r, rejected_ids, rejected_mask)
-    ref_c_logps = get_sequence_logprobs(ref_c, chosen_ids, chosen_mask)
-    ref_r_logps = get_sequence_logprobs(ref_r, rejected_ids, rejected_mask)
 
     chosen_rewards = beta * (pol_c_logps - ref_c_logps)
     rejected_rewards = beta * (pol_r_logps - ref_r_logps)
@@ -1134,9 +1137,8 @@ def train_dpo_epoch(model, train_loaders, dataset_weights, optimizer, scheduler,
 
         ref_logits = base_model.ref_forward(combined_ids)
 
-        # DPO loss in float32 for numerical stability (log_softmax differences)
         loss, chosen_r, rejected_r, reward_acc = compute_dpo_loss(
-            policy_logits.float(), ref_logits.float(),
+            policy_logits, ref_logits,
             chosen_ids, rejected_ids, chosen_mask, rejected_mask, dpo_beta
         )
         loss = loss / accumulate_grad_batches
@@ -1320,7 +1322,7 @@ def validate_dpo(model, val_loaders, device, rank, world_size, global_step, toke
                 ref_logits = base_model.ref_forward(combined_ids)
 
                 loss, _, _, reward_acc = compute_dpo_loss(
-                    policy_logits.float(), ref_logits.float(),
+                    policy_logits, ref_logits,
                     chosen_ids, rejected_ids, chosen_mask, rejected_mask, dpo_beta
                 )
 
