@@ -992,14 +992,14 @@ def get_sequence_logprobs(logits, token_ids, loss_mask):
     return torch.stack(logps)  # [B]
 
 
-def compute_dpo_loss(policy_logits, ref_logits,
+def compute_dpo_loss(policy_logits, ref_c_logps, ref_r_logps,
                      chosen_ids, rejected_ids,
                      chosen_mask, rejected_mask,
                      beta):
     """Standard DPO loss (Rafailov et al. 2023, eq. 7).
 
-    policy_logits / ref_logits: [2B, T, V] for the concatenated [chosen | rejected] batch.
-    Chosen examples occupy the first B rows, rejected the last B.
+    policy_logits: [2B, T, V] — chosen rows first, rejected rows last.
+    ref_c_logps / ref_r_logps: [B] pre-computed reference log probs (no grad).
 
     Returns (loss, chosen_reward_mean, rejected_reward_mean, reward_accuracy).
     reward = beta * (log π_θ − log π_ref).  reward_accuracy = mean(chosen_r > rejected_r).
@@ -1007,10 +1007,6 @@ def compute_dpo_loss(policy_logits, ref_logits,
     B = chosen_ids.size(0)
 
     pol_c, pol_r = policy_logits[:B], policy_logits[B:]
-
-    ref_c_logps = get_sequence_logprobs(ref_logits[:B], chosen_ids, chosen_mask)
-    ref_r_logps = get_sequence_logprobs(ref_logits[B:], rejected_ids, rejected_mask)
-    del ref_logits  # free before policy forward-graph is retained for backward
 
     pol_c_logps = get_sequence_logprobs(pol_c, chosen_ids, chosen_mask)
     pol_r_logps = get_sequence_logprobs(pol_r, rejected_ids, rejected_mask)
@@ -1132,14 +1128,21 @@ def train_dpo_epoch(model, train_loaders, dataset_weights, optimizer, scheduler,
 
         # Concatenate chosen + rejected into one batch: 2 forward passes instead of 4
         combined_ids = torch.cat([chosen_ids, rejected_ids], dim=0)  # [2B, T]
+        B = chosen_ids.size(0)
+
+        # Ref forward first: its working memory is transient (no_grad, no stored activations).
+        # Policy forward second: stores activations for backward. If order were reversed,
+        # ref's working memory would compete with the policy's stored activation graph.
+        ref_logits = base_model.ref_forward(combined_ids)
+        ref_c_logps = get_sequence_logprobs(ref_logits[:B], chosen_ids, chosen_mask)
+        ref_r_logps = get_sequence_logprobs(ref_logits[B:], rejected_ids, rejected_mask)
+        del ref_logits
 
         with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=(device.type == 'cuda')):
             policy_logits = model(combined_ids)
 
-        ref_logits = base_model.ref_forward(combined_ids)
-
         loss, chosen_r, rejected_r, reward_acc = compute_dpo_loss(
-            policy_logits, ref_logits,
+            policy_logits, ref_c_logps, ref_r_logps,
             chosen_ids, rejected_ids, chosen_mask, rejected_mask, dpo_beta
         )
         loss = loss / accumulate_grad_batches
@@ -1316,14 +1319,18 @@ def validate_dpo(model, val_loaders, device, rank, world_size, global_step, toke
                 rejected_ids = batch['rejected_ids'].to(device)
                 rejected_mask = batch['rejected_mask'].to(device)
                 combined_ids = torch.cat([chosen_ids, rejected_ids], dim=0)
+                B = chosen_ids.size(0)
+
+                ref_logits = base_model.ref_forward(combined_ids)
+                ref_c_logps = get_sequence_logprobs(ref_logits[:B], chosen_ids, chosen_mask)
+                ref_r_logps = get_sequence_logprobs(ref_logits[B:], rejected_ids, rejected_mask)
+                del ref_logits
 
                 with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=(device.type == 'cuda')):
                     policy_logits = model(combined_ids)
 
-                ref_logits = base_model.ref_forward(combined_ids)
-
                 loss, _, _, reward_acc = compute_dpo_loss(
-                    policy_logits, ref_logits,
+                    policy_logits, ref_c_logps, ref_r_logps,
                     chosen_ids, rejected_ids, chosen_mask, rejected_mask, dpo_beta
                 )
 
