@@ -982,13 +982,14 @@ def get_sequence_logprobs(logits, token_ids, loss_mask):
     shift_ids = token_ids[:, 1:]              # [B, T-1]
     shift_mask = loss_mask[:, 1:].float()     # [B, T-1]
 
-    # Gather the selected token logit then subtract logsumexp — avoids materialising
-    # a full [B, T-1, V] fp32 output tensor (~3.5 GB at batch=9, T=2048, V=50262).
-    token_logits = shift_logits.gather(2, shift_ids.unsqueeze(2)).squeeze(2).float()  # [B, T-1]
-    log_z = torch.logsumexp(shift_logits, dim=-1).float()                             # [B, T-1]
-    token_log_probs = token_logits - log_z                                             # [B, T-1]
-
-    return (token_log_probs * shift_mask).sum(dim=1)  # [B]
+    # Process one sequence at a time so both forward and backward of log_softmax are
+    # bounded to [T-1, V] (~400 MB) rather than [B, T-1, V] (~3.5 GB). Autograd frees
+    # each slice's saved tensors before moving to the next.
+    logps = []
+    for i in range(shift_logits.size(0)):
+        nll_i = F.cross_entropy(shift_logits[i], shift_ids[i], reduction='none')  # [T-1]
+        logps.append((-nll_i.float() * shift_mask[i]).sum())
+    return torch.stack(logps)  # [B]
 
 
 def compute_dpo_loss(policy_logits, ref_logits,
