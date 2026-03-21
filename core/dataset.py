@@ -698,6 +698,51 @@ def download_humaneval():
     return True
 
 
+MBPP_DATA_DIR = os.path.join(_SCRIPT_DIR, '..', 'data', 'mbpp_data')
+
+def download_mbpp():
+    """Download google-research-datasets/mbpp and save as train/test parquet files.
+
+    Official splits: train (~374 problems), test (~500 problems).
+    Each row stores the raw RL columns needed for code execution reward:
+      text      (str)        — natural-language problem description
+      code      (str)        — reference solution
+      test_list (list[str])  — assertion strings for testing model output
+      source    (str)        — 'mbpp'
+
+    Output: data/mbpp_data/train.parquet, data/mbpp_data/test.parquet
+    """
+    from datasets import load_dataset
+
+    mbpp_dir   = os.path.abspath(MBPP_DATA_DIR)
+    train_path = os.path.join(mbpp_dir, 'train.parquet')
+    test_path  = os.path.join(mbpp_dir, 'test.parquet')
+
+    if os.path.exists(train_path) and os.path.exists(test_path):
+        print(f"MBPP already exists at {mbpp_dir}")
+        return True
+
+    os.makedirs(mbpp_dir, exist_ok=True)
+
+    def format_example(example):
+        return {
+            'text':      example['text'],
+            'code':      example['code'],
+            'test_list': example['test_list'],
+            'source':    'mbpp',
+        }
+
+    print("Downloading MBPP...")
+    for split_name, path in [('train', train_path), ('test', test_path)]:
+        ds = load_dataset('google-research-datasets/mbpp', split=split_name)
+        print(f"  MBPP {split_name}: {len(ds)} problems")
+        ds = ds.map(format_example, remove_columns=ds.column_names)
+        ds.to_parquet(path)
+        print(f"  Saved to {path}")
+
+    return True
+
+
 EVAL_BUNDLE_URL = "https://karpathy-public.s3.us-west-2.amazonaws.com/eval_bundle.zip"
 EVAL_DIR = os.path.join(_SCRIPT_DIR, '..', 'data', 'eval_data')
 
@@ -866,6 +911,295 @@ def download_hh_rlhf():
     return True
 
 
+CALCULATOR_DATA_DIR = os.path.join(_SCRIPT_DIR, '..', 'data', 'calculator_data')
+
+_VERIFY_PHRASES = [
+    "Hmm, let me double-check that with Python.",
+    "Wait, let me verify that using a calculator.",
+    "Actually, let me make sure by running this in Python.",
+    "Let me confirm that calculation with code.",
+    "I should double-check this — let me use Python to be sure.",
+    "That doesn't feel right. Let me verify with Python.",
+]
+
+_CONFIRM_PHRASES = [
+    "The calculator confirms {answer}. My answer is correct.",
+    "Great, the calculator agrees: {answer}.",
+    "The result checks out — the answer is {answer}.",
+    "Python confirms {answer}, so my calculation is correct.",
+    "That matches — the answer is {answer}.",
+    "Perfect, {answer} is confirmed.",
+]
+
+
+class CalculatorDataset:
+    """Infinite stream of step-by-step reasoning problems with optional error + correction.
+
+    Each item is a dict with:
+      question        (str)   natural-language problem
+      response        (str)   full assistant response with reasoning steps
+      expected_output (str)   correct numerical answer
+      has_error       (bool)  True for the ~20% error+correction samples
+      problem_type    (str)   'arithmetic' | 'statistics' | 'conversion'
+      calculator_code (str)   reference Python code — always correct
+
+    ERROR_RATE (default 0.20) of samples contain a deliberate arithmetic error
+    in the reasoning chain. The error propagates forward through subsequent steps,
+    and is followed by self-correction using a Python code block.
+    """
+
+    ERROR_RATE = 0.20
+
+    CONVERSIONS = [
+        ('miles',     'kilometers',  1.60934,  'v * 1.60934'),
+        ('kilograms', 'pounds',      2.20462,  'v * 2.20462'),
+        ('feet',      'meters',      0.3048,   'v * 0.3048'),
+        ('gallons',   'liters',      3.78541,  'v * 3.78541'),
+        ('inches',    'centimeters', 2.54,     'v * 2.54'),
+        ('ounces',    'grams',       28.3495,  'v * 28.3495'),
+    ]
+
+    def __init__(self, seed: int = 42, rank: int = 0, max_problems=None):
+        self.seed = seed + rank
+        self.max_problems = max_problems
+
+    @staticmethod
+    def _wiggle(rng, value):
+        delta = max(2.0, abs(value) * rng.uniform(0.05, 0.15))
+        return round(value + rng.choice([-1, 1]) * delta, 4)
+
+    @staticmethod
+    def _format_response(step_lines, correct_final, introduce_error=False,
+                         wrong_final=None, calculator_code=None, rng=None):
+        body = "Let me work through this step by step.\n\n"
+        body += "\n".join(step_lines)
+        phrase = rng.choice(_VERIFY_PHRASES)
+        if not introduce_error:
+            body += f"\n\nThe answer is {correct_final}."
+            body += f"\n\n{phrase}\n\n```python\n{calculator_code}\n```\n\n"
+            body += rng.choice(_CONFIRM_PHRASES).format(answer=correct_final)
+        else:
+            body += f"\n\nSo the answer would be {wrong_final}."
+            body += f"\n\n{phrase}\n\n```python\n{calculator_code}\n```\n\n"
+            body += (
+                f"The calculator gives {correct_final}, so I made an arithmetic error earlier. "
+                f"The correct answer is {correct_final}."
+            )
+        return body
+
+    def _gen_arithmetic(self, rng, introduce_error):
+        ops = ['+', '-', '*']
+        sym = {'+': '+', '-': '−', '*': '×'}
+        n_terms    = rng.randint(3, 5)
+        nums       = [float(rng.randint(2, 40)) for _ in range(n_terms)]
+        chosen_ops = [rng.choice(ops) for _ in range(n_terms - 1)]
+
+        vals = [nums[0]]
+        for op, n in zip(chosen_ops, nums[1:]):
+            prev = vals[-1]
+            vals.append(prev + n if op == '+' else prev - n if op == '-' else prev * n)
+
+        correct_final = str(round(vals[-1], 4))
+        expr_display  = ' '.join([str(int(nums[0]))] + [f"{op} {int(n)}" for op, n in zip(chosen_ops, nums[1:])])
+        question      = f"Calculate the following expression step by step:\n{expr_display}"
+
+        running_expr = str(int(nums[0]))
+        for op, n in zip(chosen_ops, nums[1:]):
+            running_expr = f"({running_expr} {op} {int(n)})"
+        calc_code = f"print(round({running_expr}, 4))"
+
+        def _make_steps(v):
+            return [
+                f"Step {i+1}: {round(v[i], 4)} {sym[op]} {int(n)} = {round(v[i+1], 4)}"
+                for i, (op, n) in enumerate(zip(chosen_ops, nums[1:]))
+            ]
+
+        if not introduce_error:
+            response = self._format_response(_make_steps(vals), correct_final,
+                                             calculator_code=calc_code, rng=rng)
+        else:
+            err_idx            = rng.randrange(len(chosen_ops))
+            wvals              = list(vals)
+            wvals[err_idx + 1] = self._wiggle(rng, vals[err_idx + 1])
+            for i in range(err_idx + 1, len(chosen_ops)):
+                p, op, n = wvals[i], chosen_ops[i], nums[i + 1]
+                wvals[i + 1] = p + n if op == '+' else p - n if op == '-' else p * n
+            wvals    = [round(v, 4) for v in wvals]
+            response = self._format_response(
+                _make_steps(wvals), correct_final,
+                introduce_error=True, wrong_final=str(wvals[-1]),
+                calculator_code=calc_code, rng=rng,
+            )
+
+        return dict(question=question, response=response, expected_output=correct_final,
+                    has_error=introduce_error, problem_type='arithmetic', calculator_code=calc_code)
+
+    def _gen_statistics(self, rng, introduce_error):
+        n    = rng.randint(4, 8)
+        nums = [rng.randint(1, 50) for _ in range(n)]
+        stat = rng.choice(['mean', 'median'])
+
+        if stat == 'mean':
+            correct_sum   = sum(nums)
+            correct_mean  = round(correct_sum / n, 4)
+            correct_final = str(correct_mean)
+            question      = f"Find the mean of the following list:\n{nums}"
+            calc_code     = f"nums = {nums}\nprint(round(sum(nums) / len(nums), 4))"
+
+            if not introduce_error:
+                response = self._format_response(
+                    [f"Step 1: Sum = {' + '.join(map(str, nums))} = {correct_sum}",
+                     f"Step 2: Divide by count ({n}): {correct_sum} / {n} = {correct_mean}"],
+                    correct_final, calculator_code=calc_code, rng=rng,
+                )
+            else:
+                wrong_sum  = int(self._wiggle(rng, correct_sum))
+                wrong_mean = round(wrong_sum / n, 4)
+                response   = self._format_response(
+                    [f"Step 1: Sum = {' + '.join(map(str, nums))} = {wrong_sum}",
+                     f"Step 2: Divide by count ({n}): {wrong_sum} / {n} = {wrong_mean}"],
+                    correct_final,
+                    introduce_error=True, wrong_final=str(wrong_mean),
+                    calculator_code=calc_code, rng=rng,
+                )
+
+        else:  # median
+            sorted_nums = sorted(nums)
+            mid         = n // 2
+            if n % 2 == 1:
+                correct_median = float(sorted_nums[mid])
+                median_desc    = f"Middle element at index {mid}: {sorted_nums[mid]}"
+            else:
+                correct_median = (sorted_nums[mid - 1] + sorted_nums[mid]) / 2
+                median_desc    = (f"Average the two middle values "
+                                  f"({sorted_nums[mid-1]} + {sorted_nums[mid]}) / 2 = {correct_median}")
+            correct_final = str(round(correct_median, 4))
+            question      = f"Find the median of the following list:\n{nums}"
+            calc_code     = f"import statistics\nprint(round(statistics.median({nums}), 4))"
+
+            if not introduce_error:
+                response = self._format_response(
+                    [f"Step 1: Sort the list: {sorted_nums}", f"Step 2: {median_desc}"],
+                    correct_final, calculator_code=calc_code, rng=rng,
+                )
+            else:
+                wrong_median = round(self._wiggle(rng, correct_median), 4)
+                wrong_desc   = median_desc.rsplit('= ', 1)[0] + f"= {wrong_median}"
+                response     = self._format_response(
+                    [f"Step 1: Sort the list: {sorted_nums}", f"Step 2: {wrong_desc}"],
+                    correct_final,
+                    introduce_error=True, wrong_final=str(wrong_median),
+                    calculator_code=calc_code, rng=rng,
+                )
+
+        return dict(question=question, response=response, expected_output=correct_final,
+                    has_error=introduce_error, problem_type='statistics', calculator_code=calc_code)
+
+    def _gen_conversion(self, rng, introduce_error):
+        use_celsius = rng.random() < 0.25
+
+        if use_celsius:
+            value          = round(rng.uniform(-20, 100), 1)
+            correct_result = round(value * 9 / 5 + 32, 4)
+            name_from, name_to = 'Celsius', 'Fahrenheit'
+            factor_desc    = "The formula is: °F = °C × (9/5) + 32"
+            mult_desc      = f"Step 2: {value} × (9/5) + 32 = {correct_result}"
+            calc_code      = f"c = {value}\nprint(round(c * 9/5 + 32, 4))"
+        else:
+            idx            = rng.randrange(len(self.CONVERSIONS))
+            name_from, name_to, factor, code_expr = self.CONVERSIONS[idx]
+            value          = round(rng.uniform(1, 100), 1)
+            correct_result = round(value * factor, 4)
+            factor_desc    = f"The conversion factor is 1 {name_from} = {factor} {name_to}"
+            mult_desc      = f"Step 2: {value} × {factor} = {correct_result}"
+            calc_code      = f"v = {value}\nprint(round({code_expr}, 4))"
+
+        correct_final = str(correct_result)
+        question      = f"Convert {value} {name_from} to {name_to}."
+
+        if not introduce_error:
+            response = self._format_response(
+                [f"Step 1: {factor_desc}.", mult_desc],
+                f"{correct_final} {name_to}", calculator_code=calc_code, rng=rng,
+            )
+        else:
+            wrong_result = round(self._wiggle(rng, correct_result), 4)
+            response     = self._format_response(
+                [f"Step 1: {factor_desc}.", mult_desc.rsplit('= ', 1)[0] + f"= {wrong_result}"],
+                f"{correct_final} {name_to}",
+                introduce_error=True, wrong_final=f"{wrong_result} {name_to}",
+                calculator_code=calc_code, rng=rng,
+            )
+
+        return dict(question=question, response=response, expected_output=correct_final,
+                    has_error=introduce_error, problem_type='conversion', calculator_code=calc_code)
+
+    def __iter__(self):
+        rng = random.Random(self.seed)
+        generators = {
+            'arithmetic': self._gen_arithmetic,
+            'statistics': self._gen_statistics,
+            'conversion': self._gen_conversion,
+        }
+        types = list(generators.keys())
+        count = 0
+        while True:
+            if self.max_problems and count >= self.max_problems:
+                return
+            ptype         = rng.choice(types)
+            introduce_err = rng.random() < self.ERROR_RATE
+            yield generators[ptype](rng, introduce_err)
+            count += 1
+
+
+def generate_calculator_data(num_conversations=100_000, seed=42):
+    """Generate calculator reasoning dataset and save as parquet shards.
+
+    Produces num_conversations (question, response) pairs using CalculatorDataset,
+    formatted as standard conversational messages schema.
+
+    Output: data/calculator_data/shard_{i:05d}.parquet
+    Schema: {"messages": [{"role": "user", ...}, {"role": "assistant", ...}], "source": "calculator"}
+    """
+    from datasets import Dataset
+
+    out_dir = os.path.abspath(CALCULATOR_DATA_DIR)
+    if os.path.exists(out_dir) and any(f.endswith('.parquet') for f in os.listdir(out_dir)):
+        existing = [f for f in os.listdir(out_dir) if f.endswith('.parquet')]
+        print(f"Calculator data already exists at {out_dir} ({len(existing)} shards)")
+        return True
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    ds = CalculatorDataset(seed=seed, max_problems=num_conversations)
+    rows, shard_idx = [], 0
+    for i, item in enumerate(ds):
+        rows.append({
+            "messages": [
+                {"role": "user",      "content": item["question"]},
+                {"role": "assistant", "content": item["response"]},
+            ],
+            "source": "calculator",
+        })
+        if len(rows) >= SHARD_SIZE:
+            shard_path = os.path.join(out_dir, f"shard_{shard_idx:05d}.parquet")
+            Dataset.from_list(rows).to_parquet(shard_path)
+            print(f"  Saved shard_{shard_idx:05d}.parquet ({len(rows)} rows)")
+            shard_idx += 1
+            rows = []
+        if (i + 1) % 10_000 == 0:
+            print(f"  Generated {i + 1}/{num_conversations} conversations...")
+
+    if rows:
+        shard_path = os.path.join(out_dir, f"shard_{shard_idx:05d}.parquet")
+        Dataset.from_list(rows).to_parquet(shard_path)
+        print(f"  Saved shard_{shard_idx:05d}.parquet ({len(rows)} rows)")
+
+    total_shards = shard_idx + (1 if rows else 0)
+    print(f"\nDone! {num_conversations} conversations in {total_shards} shards saved to {out_dir}")
+    return True
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Download FineWeb-Edu shards and/or eval data")
     parser.add_argument("-n", "--num-files", type=int, default=-1,
@@ -884,6 +1218,8 @@ if __name__ == "__main__":
                         help="Download GSM8K math reasoning dataset (~8K train, ~1.3K test)")
     parser.add_argument("--humaneval", action="store_true",
                         help="Download HumanEval coding benchmark (164 problems, eval only)")
+    parser.add_argument("--mbpp", action="store_true",
+                        help="Download MBPP coding benchmark (~374 train, ~500 test)")
     parser.add_argument("--custom", metavar="JSON_PATH",
                         help="Ingest a JSON conversation file into data/custom_data/")
     parser.add_argument("--source", default="custom",
@@ -894,9 +1230,15 @@ if __name__ == "__main__":
                         help="Download UltraFeedback binarized DPO pairs (~61K chosen/rejected pairs)")
     parser.add_argument("--hh-rlhf", action="store_true",
                         help="Download Anthropic HH-RLHF DPO pairs (~86K helpful+harmless pairs)")
+    parser.add_argument("--calculator", action="store_true",
+                        help="Generate calculator reasoning dataset (arithmetic, statistics, unit conversions)")
+    parser.add_argument("--num-conversations", type=int, default=100_000,
+                        help="Number of conversations to generate for --calculator (default: 100000)")
     args = parser.parse_args()
 
-    if args.topic_switch:
+    if args.calculator:
+        generate_calculator_data(num_conversations=args.num_conversations)
+    elif args.topic_switch:
         generate_topic_switch_dataset()
     elif args.ultrafeedback:
         download_ultrafeedback()
@@ -912,6 +1254,8 @@ if __name__ == "__main__":
         download_gsm8k()
     elif args.humaneval:
         download_humaneval()
+    elif args.mbpp:
+        download_mbpp()
     elif args.conversation:
         download_conversation_data()
     elif args.eval:
