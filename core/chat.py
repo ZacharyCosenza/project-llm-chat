@@ -5,6 +5,7 @@ from transformers import AutoTokenizer
 from core.models import TinyGPT
 
 # --- Preset configuration ---
+# CHECKPOINT_PATH = '/home/zaccosenza/code/project-llm-chat/logs/4rgh0yll/checkpoints/checkpoint_81800.pt'
 CHECKPOINT_PATH = '/home/zaccosenza/code/project-llm-chat/logs/1oxgs1qn/checkpoints/checkpoint_81100.pt'
 # CHECKPOINT_PATH = '/home/zaccosenza/code/project-llm-chat/logs/7gfvtan7/checkpoints/checkpoint_81000.pt'
 N_LAYERS = 20
@@ -16,7 +17,7 @@ TEMPERATURE = 0.8
 TOP_K = 40
 MAX_NEW_TOKENS = 300
 
-SYSTEM_PROMPT = 'You are an expert assistant.'  # Optional default system prompt (empty = no system turn)
+SYSTEM_PROMPT = 'You are a concise and helpful assistant. Your name is ZAC-GPT-2.'  # Optional default system prompt (empty = no system turn)
 
 def _get_device():
     if torch.cuda.is_available():

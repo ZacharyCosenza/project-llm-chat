@@ -102,7 +102,9 @@ Session 2: Something I realized during training was the CORE metric was both ver
 
 To fetch do the following:
 
-scp -r -P 15548 -i ~/.ssh/id_ed25519 root@216.243.220.218:/workspace/project-llm-chat/logs/1oxgs1qn/ /home/zaccosenza/code/project-llm-chat/logs/1oxgs1qn/
+scp -r -P 15335 -i ~/.ssh/id_ed25519 root@216.243.220.229:/workspace/project-llm-chat/logs/4rgh0yll/ /home/zaccosenza/code/project-llm-chat/logs/4rgh0yll/
+
+ssh root@216.243.220.229 -p 15335 -i ~/.ssh/id_ed25519
 
 # Some mess ups and prep for SFT
 
@@ -177,7 +179,9 @@ Before we move on, I realized that our cosine and warmup were calculated based o
 
 Now I'd like to try out RLHF. I downloaded UltaFeedBack and HH_RLHF datasets which have positive and negative conversational pairs (mostly 1-2 assistant/user turns). Keeping the loss to assistant tokens only (same masking as SFT) we can take our starting LLM as reference, then learn the updated LLM policy using the standard DPO loss function. I had Claude make a wrapper for the original model, which mostly involved storing a copy of TinyGPT as a non-nn.Module object to be used as a reference later. The DPO dataloader object now outputs a positive and negative pair of ids and masks and, rather than BOS-align pack them with other conversations, keeps them standalone and just pads to the end or concatenates. 
 
-On the training set size, I have 61k UltraFeedback and 86k HH_RLHF examples. To get through 2 epochs of the entire dataset, and knowing each conversational example is not BOS-align packed, we can easily estimation the number of iterations on 4 GPUs and batch size 9 (half of normal batch size of 18 because each example is actually a pair of examples in the LLM) needed as (61 + 86) * 1000 / 4 / 9 * 2 = ~8.2k iterations.
+Session 1: On the training set size, I have 61k UltraFeedback and 86k HH_RLHF examples. To get through 2 epochs of the entire dataset, and knowing each conversational example is not BOS-align packed, we can easily estimation the number of iterations on 4 GPUs and batch size 9 (half of normal batch size of 18 because each example is actually a pair of examples in the LLM) needed as (61 + 86) * 1000 / 4 / 9 * 2 = ~8.2k iterations. Got through ~6k iterations (id = i38dwb8e). 
+
+Session 2: The new model is way to yappy so I'm trying to train for only 1k iterations (id = 4rgh0yll). It seems much better at switching topics and in general a more helpful assistant.
 
 # Infrastructure and multi-GPU setup
 
@@ -204,3 +208,84 @@ Using `torchrun --standalone` for single-node multi-GPU. The `--standalone` flag
 Reading more into memory (https://huggingface.co/spaces/nanotron/ultrascale-playbook?section=memory_for_activations) seems like if we use mixed precision training (common) then memory for parameters, gradients, optimizers states are 2N, 2N, (4+4)N for N = hv+L(12h^2 + 13h)+2h for hidden size h, vocab size v, number of layers L. We also need to store FP32 parameter master copies 4N. The activations are kinda crazy and scale more like L * seq * B * h * (34 + 5 * n_heads * seq / h) so explains why large batch operations are prone to OOM. 
 
 Another interresting considering is hardware memory utilization. Activations take up a lot of memory, particularly as sequence length and batch size increase. Flash attention and other gradient checkpointing methods throw away high memory objects like FF layer outputs after forward pass, and during backwards pass recompute them with the remaining objects. The paradigm here is that GPUs are good and computation but bad at memory, so we can just recompute what we need on the fly. Makes sense to me!
+
+# DPO Memory Lessons
+
+When implementing DPO training we hit a series of OOM errors. Each one taught a different lesson about GPU memory. Documented here as contrastive examples.
+
+## 1. Explicit dtype casts on large tensors create copies
+
+**Bad:** Casting full logit tensors to fp32 before passing into a function. The original bf16 variable stays in scope, so both live simultaneously.
+
+```python
+loss = compute_dpo_loss(policy_logits.float(), ref_logits.float(), ...)
+# In memory: bf16 policy (3.7 GB) + fp32 policy (7.4 GB)
+#          + bf16 ref    (3.7 GB) + fp32 ref    (7.4 GB) = 22 GB
+```
+
+**Better:** Keep large tensors in bf16. Upcast only after gathering — at that point the tensor is `[B, T]`, not `[B, T, V]`.
+
+```python
+loss = compute_dpo_loss(policy_logits, ref_logits, ...)
+# Inside: token_logits = gathered_logit.float()  # [B, T-1] — tiny
+```
+
+## 2. Materialising full `[B, T, V]` outputs you don't need
+
+**Bad:** `log_softmax` computes and stores a value for every token in the vocabulary, even though you only need one position per timestep.
+
+```python
+log_probs = F.log_softmax(shift_logits, dim=-1)    # [B, T-1, V] — 3.5 GB
+token_lp  = log_probs.gather(2, ids.unsqueeze(2))  # used 1/V of that
+```
+
+**Better:** Gather the raw logit first (tiny), then subtract `logsumexp` (reduces V → scalar per position). Same math, never allocates `[B, T, V]`.
+
+```python
+token_logit = shift_logits.gather(2, ids.unsqueeze(2)).squeeze(2).float()  # [B, T-1]
+log_z       = torch.logsumexp(shift_logits, dim=-1).float()                # [B, T-1]
+token_lp    = token_logit - log_z
+```
+
+## 3. Backward mirrors forward — fixing one is not enough
+
+**Bad:** Fixing the forward allocation without considering the backward. The backward of `logsumexp` computes `softmax(input)` as the gradient — the same `[B, T-1, V]` tensor, just at backward time.
+
+```python
+# Forward: no [B, T-1, V] output ✓
+log_z = torch.logsumexp(shift_logits, dim=-1)
+# Backward: grad = softmax(shift_logits) — [B, T-1, V] allocated anyway ✗
+```
+
+**Better:** Process one sequence at a time. Each slice is `[T-1, V]`, and PyTorch's autograd frees each slice's saved tensors independently before moving to the next.
+
+```python
+logps = []
+for i in range(B):
+    nll_i = F.cross_entropy(shift_logits[i], ids[i], reduction='none')  # [T-1, V] peak
+    logps.append((-nll_i.float() * mask[i]).sum())
+# Peak at any moment: [T-1, V] ≈ 400 MB, not [B, T-1, V] ≈ 3.5 GB
+```
+
+The rule: **for any op `f(x)`, its backward allocates a tensor proportional to `x`**. `log_softmax` and `logsumexp` backward both require the full softmax distribution — same size as the input.
+
+## 4. No-grad and grad-tracked computations compete if run in the wrong order
+
+**Bad:** Policy forward runs first and stores ~40 GB of activations across 20 layers for backward. The ref model then tries to allocate ~17 GB of working memory on top — no room.
+
+```python
+policy_logits = model(combined_ids)              # stores 40 GB for backward
+ref_logits    = model.ref_forward(combined_ids)  # needs 17 GB working — OOM
+```
+
+**Better:** No-grad computations have transient working memory (freed immediately after the call). Grad-tracked computations have long-lived activation graphs. Run the no-grad pass first, while the GPU is relatively empty.
+
+```python
+ref_logits    = model.ref_forward(combined_ids)  # 17 GB peak, then fully freed
+ref_c_logps   = get_sequence_logprobs(...)
+del ref_logits
+
+policy_logits = model(combined_ids)  # now 40 GB activations accumulate uncontested
+```
+
+The rule: **no-grad before grad**. A backward-tracked forward pass holds its activation graph in memory until `loss.backward()` completes. Everything else you run in that window competes with it.
