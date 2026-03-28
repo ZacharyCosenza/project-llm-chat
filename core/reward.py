@@ -17,6 +17,7 @@ Add new reward classes here as needed.
 
 import re
 import subprocess
+import sys
 import torch
 
 
@@ -28,7 +29,7 @@ def _extract_code_block(text: str) -> str | None:
 def _run_code(code: str, timeout: float) -> tuple[str, bool]:
     try:
         r = subprocess.run(
-            ['python3', '-c', code],
+            [sys.executable, '-c', code],
             capture_output=True, text=True, timeout=timeout,
         )
         return r.stdout.strip(), r.returncode == 0

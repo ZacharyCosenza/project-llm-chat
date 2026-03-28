@@ -2,12 +2,14 @@
 
 The major goal of this set of experiments is to learn more about the following (in order of importance):
 
-1. Large(ish) scale training include multi-step training (pre/mid/fine/RL) and observing how models abilities change as a function of their training
+1. Large(ish)-scale training, including multi-step training (pre/mid/fine/RL) and observing how model abilities change as a function of their training
 2. Engineering the LLM model to be somewhat interactive
 
-# Estimation of number of iterations
+# Estimation of number of iterations for pre-training
 
-K suggests three methods of setting the number of iterations: (1) direct, (2) target FLOPS, (3) parameter to data ratio. Interestingly (according to Claude) the concept of epochs is not popular with these larger models so we'll ignore and only focus on iterations and assume the datasets are so large we don't get a chance to revisit.
+I am using Andrew Karpathy's (to be called K because I cannot spell) implementation as a starting point https://github.com/karpathy/nanochat.
+
+K suggests three methods of setting the number of iterations in pre-training: (1) direct, (2) target FLOPS, (3) parameter to data ratio. Interestingly (according to Claude) the concept of epochs is not popular with these larger models so we'll ignore and only focus on iterations, and assume the datasets are so large we don't get a chance to revisit.
 
 1. Just set it based on vibes? IDK 10K?
 2. If we assume a target number of FLOPS of 4e19, and a token requires 6 FLOPS x num_parameters (roughly 2 for forward pass, 4 for backwards pass, don't trust my numbers), and batch size = 524288 we get roughly 28K iterations.
@@ -15,13 +17,13 @@ K suggests three methods of setting the number of iterations: (1) direct, (2) ta
 
 Further breaking down the training, we must understand the concept of multi-GPU. If we have 8XH100 GPUs with batch_size capability for the H100, we have 8 * batch_size which is good for (1) speed and (2) model quality. Next, remember that for a sequence, when it is passed into the tokenizer we always pad/truncate to a particular max_length = 2048. It is good to think of us thus having max_length x batch_size x num_gpu tokens per iteration. Furthermore, if we have gradient accumulation we squeeze out an additional x accumulation_steps of compute. 
 
-So determining how many iterations we may run for sould probably start with (1) estimate of the optimal number of FLOPS using the 20:1 ratio followed by (2) refining that estimate based on your budget (where we can get $/FLOP based on the GPU and provider).
+So determining how many iterations we may run for should probably start with (1) estimate of the optimal number of FLOPS using the 20:1 ratio followed by (2) refining that estimate based on your budget (where we can get $/FLOP based on the GPU and provider).
 
 # Datasets and training
 
 K uses 3 datasets for his example and 4 steps of training (let's ignore RL for now).
 
-1. Pretrain on FineWeb-Edu: large, 14.5B tokens used in training, derived from common crawl, generally high quality websites and educational resources. Use causal language modeling loss function where logit from model predicts likleihood of next token given vocabulary. This is good for general understanding of grammar, facts, reasoning. 
+1. Pretrain on FineWeb-Edu: large, 14.5B tokens used in training, derived from common crawl, generally high quality websites and educational resources. Use causal language modeling loss function where logit from model predicts likelihood of next token given vocabulary. This is good for general understanding of grammar, facts, reasoning. Some resources on this dataset here https://huggingface.co/spaces/HuggingFaceFW/blogpost-fineweb-v1
 2. Midtrain on FineWeb-Edu + SmolTalk Mix: medium, 5B tokens used in training at 70:30 split of FineWeb-Edu and SmolTalk (which uses Q:A conversations in coding, math, creative writing, advice, chitchat). Uses same loss function as pretraining. Mixing is useful to stop model from overfitting on new data (might lose world knowledge in favor of conversational knowledge).
 3. SFT on SmolTalk: medium, 2-3B tokens of 100% SmolTalk, uses masked language modeling loss function to only generate the assistant response (the answer). 
 
@@ -29,7 +31,7 @@ Remember that attention masking is already used in training GPT-style models, so
 
 # Getting started
 
-Let's start understanding the datasets. In K's code the download process is kicked off using python -m nanochat.dataset -n num_shards so let's just copy that (this loads the pretraining data from Huggingface). Speaking of data, let's plan the overall size of the model. When starting, user should download the shards they need and store them as parquet files. I then went ahead and incorporated the major aspects of K's code into pytorch lightning because I find dealing with the multi-GPU process tedious. I have yet to scale up to the proper model size so it is unclear if the dataloaders have been implemented correctly but we will see. I also tried to use his distributed Muon optimizer with lightning but that required a full custom training step which I don't want to deal with quite yet. In it's place I had Claude extract out the underlying logic of the optimizer (basically splitting the LLM into slow and fast optimizations) and created a good baseline using AdamW. I am still trying to figure out how much we should abstract away from K's very low level implementation and still aline with Goal 2 above. I also managed to get a basic version of the model working at around 325M parameters with max_seq_len = 128. Next step is scaling up to the proper parameter size.
+Let's start understanding the datasets. In K's code the download process is kicked off using python -m nanochat.dataset -n num_shards so let's just copy that (this loads the pretraining data from Huggingface). Speaking of data, let's plan the overall size of the model. When starting, user should download the shards they need and store them as parquet files. I then went ahead and incorporated the major aspects of K's code into pytorch lightning because I find dealing with the multi-GPU process tedious. I have yet to scale up to the proper model size so it is unclear if the dataloaders have been implemented correctly but we will see. I also tried to use his distributed Muon optimizer with lightning but that required a full custom training step which I don't want to deal with quite yet. In its place I had Claude extract out the underlying logic of the optimizer (basically splitting the LLM into slow and fast optimizations) and created a good baseline using AdamW. I am still trying to figure out how much we should abstract away from K's very low level implementation and still align with Goal 2 above. I also managed to get a basic version of the model working at around 325M parameters with max_seq_len = 128. Next step is scaling up to the proper parameter size.
 
 # Scaling up
 
@@ -48,11 +50,13 @@ However, I am still running into an issue where, under certain conditions like v
 
 NCCL_P2P_DISABLE=1 torchrun --nproc_per_node=X run_X.py
 
-In further experiments, the VRAM memory issue, while resolved from a leakage perspective, still came up as the memory usage sits near the edge of OOM. So when certain validation steps pushed memory outside this bound the program fails. I find this odd for two reasons: (1) we are not keeping any artifacts of validation in memory and (2) the differences between validation steps in terms of memory is small. I removed the external validation steps as they required downloading artifacts, which may be held in memory in uncontrolled ways. Next I ran into a crash on one of the dataloader workers so I am setting num_workers = 0. This should increase stability. With these fixes I can get stable training with batch_size = 16 and max_seq_length = 2024/4, with lack of compute being the only thing holding us back. We are finally getting learning as the model goes from uniform random samples, to modal words (mostly "the" and "\n"), to modal sentence pieces ("United States", "from the") at ~500 iterations. I then switched from A40s to H100s and the speedup (maybe because the lack of multi-GPU communications when comparing 1XH100 vs 8XA40) was dramatic (~20x faster, ~33% lower cost). One issue is that I am using runpod.io service for GPU instances but I often cannot get H100s. I am now testing out moving to lambda.ai as they seem to have many more high quality GPUs.
+In further experiments, the VRAM memory issue, while resolved from a leakage perspective, still came up as the memory usage sits near the edge of OOM. So when certain validation steps pushed memory outside this bound the program fails. I find this odd for two reasons: (1) we are not keeping any artifacts of validation in memory and (2) the differences between validation steps in terms of memory is small. I removed the external validation steps as they required downloading artifacts, which may be held in memory in uncontrolled ways. Next I ran into a crash on one of the dataloader workers so I am setting num_workers = 0. This should increase stability. With these fixes I can get stable training with batch_size = 16 and max_seq_length = 2024/4, with lack of compute being the only thing holding us back. 
+
+We are finally getting learning as the model goes from uniform random samples, to modal words (mostly "the" and "\n"), to modal sentence pieces ("United States", "from the") at ~500 iterations. I then switched from A40s to H100s and the speedup (maybe because the lack of multi-GPU communications when comparing 1XH100 vs 8XA40) was dramatic (~20x faster, ~33% lower cost). One issue is that I am using runpod.io service for GPU instances but I often cannot get H100s. I am now testing out moving to lambda.ai as they seem to have many more high quality GPUs.
 
 # Re-estimate of the size/scope of pre-training
 
-After futher experiments, I find that I can use a context window of 2048 for my model and hold it in memory on an H200 GPU with batch_size 22 at ~2.35s/iteration. This is less than the 32 that K uses and I am still investigating this. Let's say I want to keep my model at ~500M parameters and reach the 1e19 FLOP threshhold, this will require ~10B tokens (or about 170 shards). Each iteration FLOP count can be calculated as (batch_size = 22) * (context = 2048) * (num_parameters = 500M) * (forward + backwards = 6) * (gradient accumulation = 4) = 4e14. This assumed a single H200 with grad_accum=4, giving 22 × 2048 × 4 = 180,224 tokens/optimizer step. Thus, to get 1e19 FLOP total we need 1e5 (25,000) iterations. Using Chinchilla optimiality I get 20:1 -> 500M --> ~10B tokens --> 55k iterations. Let's split the difference and go with 40k iterations.
+After further experiments, I find that I can use a context window of 2048 for my model and hold it in memory on an H100 GPU with batch_size 22 at ~2.35s/iteration. This is less than the 32 that K uses and I am still investigating this. Let's say I want to keep my model at ~500M parameters and reach the 1e19 FLOP threshold, this will require ~10B tokens (or about 170 shards). Each iteration FLOP count can be calculated as (batch_size = 22) * (context = 2048) * (num_parameters = 500M) * (forward + backwards = 6) * (gradient accumulation = 4) = 4e14. This assumed a single H100 with grad_accum=4, giving 22 × 2048 × 4 = 180,224 tokens/optimizer step. Thus, to get 1e19 FLOP total we need 1e5 (25,000) iterations. Using Chinchilla optimality I get 20:1 -> 500M --> ~10B tokens --> 55k iterations. Let's split the difference and go with 40k iterations.
 
 I tried to scale to 8XH100 but perhaps due to overhead issues I needed to reduce the batch_size to 18 to still get ~2.4s / iteration. This would then require ~15,000 iterations. The logical next step is to compare the loss curve in single vs multi-GPU setup to validate this approach works, but my loss curves are identical even when increasing the learning rates. I ran some experiments and found that it was likley that was an artifact of training with a low learning rate early in pre-training. I just looked up what a common GPT2-style optimization technique looks like and used that, which seemed to work.
 
@@ -60,17 +64,17 @@ I tried to scale to 8XH100 but perhaps due to overhead issues I needed to reduce
 
 Session 1: I will start pre-training. I first starting running on 2XH100 using batch_size = 22 for ~4k iterations while watching The Brutalist. That gives me 720,896,000 tokens (~720.9M), so ~9.28B to go (id = qfkhmres)!
 
-Session 2: Updated with improved saving. Let's reload the checkpoint and start at iteration 4000. If we use 4XH100. To finish training we'd need only 18k iterations here, but I needed to reduce batch_size = 18, so we're back up to needing 22k iterations. However I only got through ~500 iterations because I'm in a coffee shop with bad internet connection. Trained 147,456,000 tokens (~147.5M), cumulative ~868.4M, ~9.13B to go (id = 46acw8eb). [actually 73M tokens]
+Session 2: Updated with improved saving. Let's reload the checkpoint and start at iteration 4000. If we use 4XH100. To finish training we'd need only 18k iterations here, but I needed to reduce batch_size = 18, so we're back up to needing 22k iterations. However I only got through ~500 iterations because I'm in a coffee shop with bad internet connection. Trained 147.5M, cumulative ~868.4M, ~9.13B to go (id = 46acw8eb). [actually 73M tokens, this will be explained later]
 
-Session 3: 4500 starting, 10000 ending, batch_size 18 and 4 GPUs. Trained 1,622,016,000 tokens (~1.62B), cumulative ~2.49B, ~7.51B to go (id = carxia2m). [actually 811M tokens]
+Session 3: 4500 starting, 10000 ending, batch_size 18 and 4 GPUs. Trained 1.62B, cumulative ~2.49B, ~7.51B to go (id = carxia2m). [actually 811M tokens]
 
-Session 4: starting 10000, batch_size 18 and 4 GPUs, ended 16500. Trained 1,916,928,000 tokens (~1.92B), cumulative ~4.41B, ~5.59B to go (id = 56c2n5c6). [actually 958M tokens]
+Session 4: starting 10000, batch_size 18 and 4 GPUs, ended 16500. Trained ~1.92B, cumulative ~4.41B, ~5.59B to go (id = 56c2n5c6). [actually 958M tokens]
 
-Session 5: started 16500 ended checkpoint_35800.pt (iteration 35800), batch_size 18 and 4 GPUs (id = iec3w33j). Trained 5,689,344,000 tokens (~5.69B), cumulative ~10.10B, COMPLETED! I was at Trees Bar near Park Slope enjoying Wine Wednesdays after PPTC run club and got to watch my child (who I have named ZAC-GPT) learn how to say full sentences! [actually 2.8B tokens]
+Session 5: started 16500 ended 35800, batch_size 18 and 4 GPUs (id = iec3w33j). Trained ~5.69B, cumulative ~10.10B, COMPLETED! I was at Trees Bar near Park Slope enjoying Wine Wednesdays after run club and got to watch my child (who I have named ZAC-GPT) learn how to say full sentences! [actually 2.8B tokens]
 
-Session 6: Okay so I deleted iec3w33j by accident so let's restart at 56c2n5c6, which starts at iteration 16500 with batch_size 18 on 4 GPUs and ended at iteration 38200 (id = j651hrgg). Trained 6,394,368,000 tokens (~6.39B), cumulative ~10.80B, COMPLETED for ZAC-GPT-2 (with extra tokens for good measure)! [actually 3.2B tokens]
+Session 6: Okay so I deleted iec3w33j by accident so let's restart at 56c2n5c6, which starts at iteration 16500 with batch_size 18 on 4 GPUs and ended at iteration 38200 (id = j651hrgg). Trained ~6.39B, cumulative ~10.80B, COMPLETED for ZAC-GPT-2! [actually 3.2B tokens]
 
-Absolutley facinating observations by the end. The LLM goes from random words (due to random weights), to most common words (often "the") after a few hundred iterations, to slowly being able to form larger sentences (~10000 iterations) and paragraphs (~30000 iterations). I knew that pre-training would be helpful for spelling, grammar, and basic sentence construction, but running a set of world knowledge tasks on them I get these results: 
+Absolutely fascinating observations by the end. The LLM goes from random words (due to random weights), to most common words (often "the") after a few hundred iterations, to slowly being able to form larger sentences (~10000 iterations) and paragraphs (~30000 iterations). I knew that pre-training would be helpful for spelling, grammar, and basic sentence construction, but running a set of world knowledge tasks on them I get these results: 
 
 The tallest mountain in the world is:
 
@@ -80,61 +84,59 @@ Iteration 10000: ...the Sargasso Glacier, which is the highest mountain in the w
 
 Iteration 38200: ...the Mount Everest. The mountain is a part of Nepal, India, Nepal, Bhutan, Nepal
 
-Indicating that because the pre-training dataset contains a QA and world knowledge in it's distribution, even a simple pre-trained GPT2-style LLM can generate plausable responses without mid-training or fine-tuning. Cool!
+Indicating that because the pre-training dataset contains QA and world knowledge in its distribution, even a simple pre-trained GPT-2-style LLM can generate plausible responses without mid-training or fine-tuning. Cool!
 
 # Creating a set for validation
 
-The paradigm here is only having training and validation. We hold out a parquet file for validation. I had been using perplexity loss for this, but I want to add some additional tests. I have started with a set of sentence completions that will be printed as well as some basic world knowledge compeltion tasks. This required adding a predict function to the model to make autoregressive temperature-normalized predictions until a max token limit. Eventually Claude Code got good enough models to easily integrate K's CORE evaluation metrics into my setup. Here is how the validation set up works:
+The paradigm here is only having training and validation. We hold out a parquet file for validation. I had been using perplexity loss for this, but I want to add some additional tests. I have started with a set of sentence completions that will be printed as well as some basic world knowledge completion tasks. This required adding a predict function to the model to make autoregressive temperature-normalized predictions until a max token limit. Eventually Claude Code got good enough models to easily integrate K's CORE evaluation metrics into my setup. Here is how the validation set up works:
 
 (1) Open ended sentence completion (for fun)
 (2) World knowledge (harder but still fun)
 (3) Perplexity (raw score, good for tracking pre-training but not details)
 (4) CORE Metric (K-shots available):
     - Multiple Choice: context + different answers is tokenized for k answers, the choice with the lowest mean loss (for answer only) is picked, accuracy computed as whether you matched the gold standard. Inductive bias here is ICL of answer space.
-    - Schema: different context + same answer is tokenized, same metric as above, against loss computed as mean for context segment. Inductive bias here is ICL of context space, requireing more world knowledge and reasoning.
+    - Schema: different context + same answer is tokenized, same metric as above, against loss computed as mean for context segment. Inductive bias here is ICL of context space, requiring more world knowledge and reasoning.
     - Language Modeling: regular continuation with accuracy of argmax token. Inductive bias is strict recall.
 
 # Mid-training
 
-Session 1: With pre-training done let's test out mid-training (I know K ended up removing mid-training but whatever this is fun). The major changes here are (i) introducing special tokens (BOS, roles) and (ii) training on conversational data. I'm going to use 30% FineWebEdu  (same data as pre-training) and 70% mix of SmolTalk (synthetic multi-turn QA in technical domains) and UltaChatGen (synthetic dialogue and currated discussions). Goal is to hit 5B tokens with this distribution so with batch_size 18 and 4XH100 GPUs that's ~20k iterations (id = pu94vo4r).
+Session 1: With pre-training done let's test out mid-training (I know K ended up removing mid-training but whatever this is fun). The major changes here are (i) introducing special tokens (BOS, roles) and (ii) training on conversational data. I'm going to use 30% FineWeb-Edu (same data as pre-training) and 70% mix of SmolTalk (synthetic multi-turn QA in technical domains) and UltraChatGen (synthetic dialogue and curated discussions). Goal is to hit 5B tokens with this distribution so with batch_size 18 and 4XH100 GPUs that's ~20k iterations (id = pu94vo4r).
 
 Session 2: Something I realized during training was the CORE metric was both very noisy and not increasing much. I originally took this as due to high learning rate, but realized (i) few sequences were making up the CORE metric and (ii) I was padding, and not packing, the mid-training data. Playing around with more complex QA and knowledge checks it gets the sentence structure and flavor of the answer, but hardly the exact answer. Let's try this again. If we still want to get to 5B mid-training tokens, previous session was really ~50%, so we have to do another 2.5B, or 10k iterations of the new packed dataset (id = 771w9gdd).
 
-To fetch do the following:
+To fetch model weights do the following:
 
-scp -r -P 15335 -i ~/.ssh/id_ed25519 root@216.243.220.229:/workspace/project-llm-chat/logs/4rgh0yll/ /home/zaccosenza/code/project-llm-chat/logs/4rgh0yll/
-
-ssh root@216.243.220.229 -p 15335 -i ~/.ssh/id_ed25519
+scp -r -P 18392 -i ~/.ssh/id_ed25519 root@216.243.220.229:/workspace/project-llm-chat/logs/c9pt8niy/ /home/zaccosenza/code/project-llm-chat/logs/c9pt8niy/
 
 # Some mess ups and prep for SFT
 
 I noticed some things that give me pause for the next phase of training: 
 
-(1) re-reading some documentation on K's repo I noticed he says 350 shards are needed for pre-training on 10B tokens. I did some sampling of the FineWebEdu dataset and get ~56M tokens/shard, so to get 10B tokens I need 178 shards. I re-checked my notes and got the same answer, but checking the server I only had 100 shards downloaded. This might explain why my CORE score was 0.19 despite passing through mid-training. Also it turns out I was not accounting for grad_accmulation = max(1, 4 // world_size). With world_size = 4 I underestimated the number of tokens per iteration, so pre-training I really only trained on ~6.2B tokens and mid-training I really only trained on ~3B tokens. Lession learned, be very detailed in the training dataset sizes to match expected specs! 
+(1) re-reading some documentation on K's repo I noticed he says 350 shards are needed for pre-training on 10B tokens. I did some sampling of the FineWeb-Edu dataset and get ~56M tokens/shard, so to get 10B tokens I need 178 shards. I re-checked my notes and got the same answer, but checking the server I only had 100 shards downloaded. This might explain why my CORE score was 0.19 despite passing through mid-training. Also it turns out I was not accounting for grad_accumulation = max(1, 4 // world_size). With world_size = 4 I underestimated the number of tokens per iteration, so pre-training I really only trained on ~6.2B tokens and mid-training I really only trained on ~3B tokens. Lesson learned, be very detailed in the training dataset sizes to match expected specs! 
 
-(2) Chatting with 771w9gdd I noticed it (i) lies, (ii) runs on too long and (iii) mimics the user tokens. I could be wrong, but it seems to me that at minimum (ii) and (iii) could be solved with SFT and RLHF. (i) might be solved by going back and re-pre/mid-training. Seeing as this is expensive, we've learned a lot about large-scale training, and I want to start exploring other topics, I think we can start SFT and RLHF. Part of the value of this project was to struggle with these unfamilar topics and actually learn them, rather than rely on perfect vibecoding and other peoples code. 
+(2) Chatting with 771w9gdd I noticed it (i) lies, (ii) runs on too long, and (iii) mimics the user tokens. I could be wrong, but it seems to me that at minimum (ii) and (iii) could be solved with SFT and RLHF. (i) might be solved by going back and re-pre/mid-training. Seeing as this is expensive, we've learned a lot about large-scale training, and I want to start exploring other topics, I think we can start SFT and RLHF. Part of the value of this project was to struggle with these unfamilar topics and actually learn them, rather than rely on perfect vibecoding and other peoples code. 
 
 (3) I have the ability to resume training, but I never exclude already seen shards from training. So while the data is stratified across GPUs and then randomly selected, some data may have been seen beforehand. 
 
-(4) After some re-engineering in preparation for SFT I found that I was appending EOS token to end of entire document, and the default EOS was being appended to the end of rows of text in FineWebEdu. The inductive bias here for EOS will therefore be a weak end-of-the-line signal, rather than a genuine EOS token. However, happily, mid-train was done with assistant-to-user passing, so I can re-purpose user as an EOS token during QA.
+(4) After some re-engineering in preparation for SFT I found that I was appending EOS token to end of entire document, and the default EOS was being appended to the end of rows of text in FineWebEdu. The inductive bias here for EOS will therefore be a weak end-of-the-line signal, rather than a genuine EOS token. However, happily, mid-train was done with assistant-to-user passing, so I can re-purpose user as an EOS token during QA. Unhappily, I was backpropagating the loss for user and system tokens so quality is also really low.
 
 I think all together (1) (2) (3) all point to a poor model with low performance due to overfitting on a smaller less diverse distribution of pre-trained data. I'm going to run an experiment to see how much we can recover by solving the above issues. If I don't see a significant drop in validation we might move forward with the mulligan and do some more experiments on our poor dumb little model.
 
 # SFT
 
-From experiments on conversational data (ultachat and smoltalk) we have ~ 30 + 8 + 7 M tokens / shard * 30 shards = ~1.35B tokens. Assuming 2048 tokens / seq, 18 batch size, 4 GPUs and our logic of accumulate_grad_batches = max(1, 4 // world_size) = 1, I get 8.8k iterations to run through all data in a single epoch. Reading the literature I tend to see SFT being done on basis of number of examples rather than number of tokens, of which we have ~1.4M examples in our datasets. So the question is do we start SFT with many synthetic examples or few high quality examples? The usualy answer is few high quality, but as we've already established, my model is ~40% undertrained, so something inbetween mid-training and SFT might be best here. 
+From experiments on conversational data (UltraChat and SmolTalk) we have ~ 30 + 8 + 7 M tokens / shard * 30 shards = ~1.35B tokens. Assuming 2048 tokens / seq, 18 batch size, 4 GPUs and our logic of accumulate_grad_batches = max(1, 4 // world_size) = 1, I get 8.8k iterations to run through all data in a single epoch. Reading the literature I tend to see SFT being done on basis of number of examples rather than number of tokens, of which we have ~1.4M examples in our datasets. So the question is do we start SFT with many synthetic examples or few high quality examples? The usual answer is few high quality, but as we've already established, my model is ~40% undertrained, so something in between mid-training and SFT might be best here.
 
 Session 1: trained above model for 10k iterations. Works much better as a conversational agent compared to during mid-training. Looks like the assistant masking worked! I'd like to run a quick fine tune on the LIMA data next (id = ieqhwwrl)
 
 Session 2: I also got the LIMA dataset so let's train for 3 epochs. At 683k tokens with ~20% padding that's 683000 / 2048 / (1 GPU) / 18 (batch size) / (1 - 0.2) = 69 iterations. (id = w8a44yr1)
 
-Chatting with the model here I can tell it is much more able to hold onto a conversation like a helpful assistant. The assistant masking and SFT must have really helped. ZAC-GPT-2 is still very stupied, making mistakes on basic world knowledge, but I attribute that to mssing ~40% of pre-training due to my token estimation mistake. Going through K's nanochat, I noticed he has several tasks which might be helpful for additional SFT: MMLU and GSM8K. MMLU is a multiple choice exam of 57 topics. Normally it is a task with solutions for an LLM, but I've converted it to a knowledge QA by explosing the answer as assistant token. GSM8K is made up of simple math problems, but posed as multi-step reasoning. This should improve the models baseline reasoning abilities and tool use. The reasoning is not done through special tokens, but calculator use is (through << >>). 
+Chatting with the model here I can tell it is much more able to hold onto a conversation like a helpful assistant. The assistant masking and SFT must have really helped. ZAC-GPT-2 is still very stupid, making mistakes on basic world knowledge, but I attribute that to missing ~40% of pre-training due to my token estimation mistake. Going through K's nanochat, I noticed he has several tasks which might be helpful for additional SFT: MMLU and GSM8K. MMLU is a multiple choice exam of 57 topics. Normally it is a task with solutions for an LLM, but I've converted it to a knowledge QA by explosing the answer as assistant token. GSM8K is made up of simple math problems, but posed as multi-step reasoning. This should improve the models baseline reasoning abilities and tool use. The reasoning is not done through special tokens, but calculator use is (through << >>). 
 
 Session 3: bringing in the MMLU train dataset is ~100k conversations at 377 tokens / conversation, estimated padding percentage is 10%, this gives ~20k chunks. If we use batch size 18 and 4 GPUs that means we need 284 iterations / epoch. For GSM8K the train dataset is 7.4k conversations at 153 tokens / conversation, estimated padding percentage is 4% (lower because the conservations are smaller), this gives about 575 chunks. Using same batch size and GPUs we'd need 8 iterations / epoch. If we want ~3 epochs for SFT, that makes 852 iterations. If they are mixed in proportion to their number of packed dataloader runs, we get 97% for MMLU and 3% for GSM8K. Let round up to 1k iterations. (id = 7gfvtan7).
 
 # Fixing post-SFT things
 
-Playing with 7gfvtan7 is so fun. It's so dumb you can clearly see the lack of pre-training tokens (world knowledge is bad). Also I am not totally sure that our mid-training did not screw up the model even more. K ended up removing mid-training after implementing a BOS aligned dataloader, whereas ZAC-GPT-2 was exposed to 2.5B tokens in mid-train convservational logs, so sometimes it repeats queries back to you. This could be something it learned during mid-training when I backpropagated system and user token losses. 
+Playing with 7gfvtan7 is so fun. It's so dumb you can clearly see the lack of pre-training tokens (world knowledge is bad). Also I am not totally sure that our mid-training did not screw up the model even more. K ended up removing mid-training after implementing a BOS aligned dataloader, whereas ZAC-GPT-2 was exposed to 2.5B tokens in mid-train conversational logs, so sometimes it repeats queries back to you. This could be something it learned during mid-training when I backpropagated system and user token losses. 
 
 Two areas we might try to fix are (1) the model has trouble switching themes and (2) the model has a tendency to repeat itself (I don't care about world knowledge, pre-training is too expensive and boring). For (1), an example might be the following: 
 
@@ -169,7 +171,7 @@ A boat that moves with grace,
 A boat that moves with grace,
 A boat that moves with grace,
 
-I put together a dataset that uses our previous conversational datasets but does topic switching. Going back and forth with Claude it's actually hard to say how many tokens the model needs to see to adhere to certain behavior. I'm thinking that the complexity of the task naturally leads to a notion of the number of tokens needed, but not every token is treated equally. If every example we give is an example of topic switching behavior, that's a high density signal and would require fewer epochs/examples/lower LR. On the other hand, if we are tring to teach a model a more complex behavior with generic data (for example, mathematical reasoning using youtube comments) that's a low density signal so would require large amounts of data (closer to pre-training). The reason I am thinking hard about this is because we are outside of the previous paradigm of having a set of data we want to expose to the model, rather we have unlimited data and need to figure out how to impart behavior. Maybe we should have thought about our prior SFT runs in the same way? Hard to say.
+I put together a dataset that uses our previous conversational datasets but does topic switching. Going back and forth with Claude it's actually hard to say how many tokens the model needs to see to adhere to certain behavior. I'm thinking that the complexity of the task naturally leads to a notion of the number of tokens needed, but not every token is treated equally. If every example we give is an example of topic switching behavior, that's a high density signal and would require fewer epochs/examples/lower LR. On the other hand, if we are trying to teach a model a more complex behavior with generic data (for example, mathematical reasoning using youtube comments) that's a low density signal so would require large amounts of data (closer to pre-training). The reason I am thinking hard about this is because we are outside of the previous paradigm of having a set of data we want to expose to the model, rather we have unlimited data and need to figure out how to impart behavior. Maybe we should have thought about our prior SFT runs in the same way? Hard to say.
 
 Let's assume, because of the high signal to complexity ratio of this task and dataset, we need 1k examples. Each example is roughly 2048 tokens because of the way we are packing the parquets, so we'd need ~2M tokens. That gives 13 iterations / epoch. Let's go with 7 epochs (this one is straight up coming from Claude). So that's ~100 iterations.
 
@@ -177,11 +179,21 @@ Let's assume, because of the high signal to complexity ratio of this task and da
 
 Before we move on, I realized that our cosine and warmup were calculated based on the max_steps, but because we've just been adding onto previous max_steps we are not doing warmup or time-dependent optimization correctly. This was another massive miss on my part and Claude probably didn't catch it because it assumed this script is doing independent training runs every time. It's been fixed to utilize --resume and is fixed. Another dumb thing that I noticed is that we carried over using the first shard for validation from pre-training. This made sense because pre-training uses language modeling loss and, with like 60k rather large sets of data each row, was enough data for a validation signal. However, with smaller datasets being used in SFT and RLHF we should have moved to the standard train/test/val split of row-examples. 
 
-Now I'd like to try out RLHF. I downloaded UltaFeedBack and HH_RLHF datasets which have positive and negative conversational pairs (mostly 1-2 assistant/user turns). Keeping the loss to assistant tokens only (same masking as SFT) we can take our starting LLM as reference, then learn the updated LLM policy using the standard DPO loss function. I had Claude make a wrapper for the original model, which mostly involved storing a copy of TinyGPT as a non-nn.Module object to be used as a reference later. The DPO dataloader object now outputs a positive and negative pair of ids and masks and, rather than BOS-align pack them with other conversations, keeps them standalone and just pads to the end or concatenates. 
+Now I'd like to try out RLHF. I downloaded UltraFeedback and HH-RLHF datasets which have positive and negative conversational pairs (mostly 1-2 assistant/user turns). Keeping the loss to assistant tokens only (same masking as SFT) we can take our starting LLM as reference, then learn the updated LLM policy using the standard DPO loss function. I had Claude make a wrapper for the original model, which mostly involved storing a copy of TinyGPT as a non-nn.Module object to be used as a reference later. The DPO dataloader object now outputs a positive and negative pair of ids and masks and, rather than BOS-align pack them with other conversations, keeps them standalone and just pads to the end or concatenates. 
 
-Session 1: On the training set size, I have 61k UltraFeedback and 86k HH_RLHF examples. To get through 2 epochs of the entire dataset, and knowing each conversational example is not BOS-align packed, we can easily estimation the number of iterations on 4 GPUs and batch size 9 (half of normal batch size of 18 because each example is actually a pair of examples in the LLM) needed as (61 + 86) * 1000 / 4 / 9 * 2 = ~8.2k iterations. Got through ~6k iterations (id = i38dwb8e). 
+Session 1: On the training set size, I have 61k UltraFeedback and 86k HH-RLHF examples. To get through 2 epochs of the entire dataset, and knowing each conversational example is not BOS-align packed, we can easily estimation the number of iterations on 4 GPUs and batch size 9 (half of normal batch size of 18 because each example is actually a pair of examples in the LLM) needed as (61 + 86) * 1000 / 4 / 9 * 2 = ~8.2k iterations. Got through ~6k iterations (id = i38dwb8e). 
 
-Session 2: The new model is way to yappy so I'm trying to train for only 1k iterations (id = 4rgh0yll). It seems much better at switching topics and in general a more helpful assistant.
+Session 2: The new model is way too yappy so I'm trying to train for only 1k iterations (id = 4rgh0yll). It seems much better at switching topics and in general a more helpful assistant.
+
+# Code RL
+
+With DPO done, next step is online REINFORCE training on code execution. The setup: each step generates completions, runs them through Python, scores the output, and updates the policy. No reference model needed. Let's start with code generation as that is an RL environment I can utilize right now. Here is the dataset I am thinking of using: 1/3 calculator / 1/3 HumanEval / 1/3 MBPP. Calculator problems are generated programmatically (arithmetic chains, statistics, unit conversions). HumanEval and MBPP are loaded from pre-downloaded parquets.
+
+Session 1: 100 iterations on 2 GPUs at batch size 9 (id = jdf2ybd7)
+
+Session 2: 42 iterations on 4 GPUs at batch size 18 (id = c9pt8niy)
+
+Both result in no noticable difference in model capacity to reason or use these tools. I think I am at a good stopping point here. There is only so much we can do with an undertrained dumb model.
 
 # Infrastructure and multi-GPU setup
 
@@ -204,88 +216,3 @@ The cloud GPU instances I used (RunPod, Lambda) don't have InfiniBand or NVLink 
 Together these flags tell NCCL: "don't try anything fancy, just use sockets over loopback." The tradeoff is some communication overhead vs. NVLink/P2P, but for 4-GPU training the bottleneck is compute not communication, so the impact is negligible.
 
 Using `torchrun --standalone` for single-node multi-GPU. The `--standalone` flag handles the rendezvous internally (no need for a separate etcd or c10d store). Each GPU gets its own process with RANK, WORLD_SIZE, and LOCAL_RANK set automatically.
-
-Reading more into memory (https://huggingface.co/spaces/nanotron/ultrascale-playbook?section=memory_for_activations) seems like if we use mixed precision training (common) then memory for parameters, gradients, optimizers states are 2N, 2N, (4+4)N for N = hv+L(12h^2 + 13h)+2h for hidden size h, vocab size v, number of layers L. We also need to store FP32 parameter master copies 4N. The activations are kinda crazy and scale more like L * seq * B * h * (34 + 5 * n_heads * seq / h) so explains why large batch operations are prone to OOM. 
-
-Another interresting considering is hardware memory utilization. Activations take up a lot of memory, particularly as sequence length and batch size increase. Flash attention and other gradient checkpointing methods throw away high memory objects like FF layer outputs after forward pass, and during backwards pass recompute them with the remaining objects. The paradigm here is that GPUs are good and computation but bad at memory, so we can just recompute what we need on the fly. Makes sense to me!
-
-# DPO Memory Lessons
-
-When implementing DPO training we hit a series of OOM errors. Each one taught a different lesson about GPU memory. Documented here as contrastive examples.
-
-## 1. Explicit dtype casts on large tensors create copies
-
-**Bad:** Casting full logit tensors to fp32 before passing into a function. The original bf16 variable stays in scope, so both live simultaneously.
-
-```python
-loss = compute_dpo_loss(policy_logits.float(), ref_logits.float(), ...)
-# In memory: bf16 policy (3.7 GB) + fp32 policy (7.4 GB)
-#          + bf16 ref    (3.7 GB) + fp32 ref    (7.4 GB) = 22 GB
-```
-
-**Better:** Keep large tensors in bf16. Upcast only after gathering — at that point the tensor is `[B, T]`, not `[B, T, V]`.
-
-```python
-loss = compute_dpo_loss(policy_logits, ref_logits, ...)
-# Inside: token_logits = gathered_logit.float()  # [B, T-1] — tiny
-```
-
-## 2. Materialising full `[B, T, V]` outputs you don't need
-
-**Bad:** `log_softmax` computes and stores a value for every token in the vocabulary, even though you only need one position per timestep.
-
-```python
-log_probs = F.log_softmax(shift_logits, dim=-1)    # [B, T-1, V] — 3.5 GB
-token_lp  = log_probs.gather(2, ids.unsqueeze(2))  # used 1/V of that
-```
-
-**Better:** Gather the raw logit first (tiny), then subtract `logsumexp` (reduces V → scalar per position). Same math, never allocates `[B, T, V]`.
-
-```python
-token_logit = shift_logits.gather(2, ids.unsqueeze(2)).squeeze(2).float()  # [B, T-1]
-log_z       = torch.logsumexp(shift_logits, dim=-1).float()                # [B, T-1]
-token_lp    = token_logit - log_z
-```
-
-## 3. Backward mirrors forward — fixing one is not enough
-
-**Bad:** Fixing the forward allocation without considering the backward. The backward of `logsumexp` computes `softmax(input)` as the gradient — the same `[B, T-1, V]` tensor, just at backward time.
-
-```python
-# Forward: no [B, T-1, V] output ✓
-log_z = torch.logsumexp(shift_logits, dim=-1)
-# Backward: grad = softmax(shift_logits) — [B, T-1, V] allocated anyway ✗
-```
-
-**Better:** Process one sequence at a time. Each slice is `[T-1, V]`, and PyTorch's autograd frees each slice's saved tensors independently before moving to the next.
-
-```python
-logps = []
-for i in range(B):
-    nll_i = F.cross_entropy(shift_logits[i], ids[i], reduction='none')  # [T-1, V] peak
-    logps.append((-nll_i.float() * mask[i]).sum())
-# Peak at any moment: [T-1, V] ≈ 400 MB, not [B, T-1, V] ≈ 3.5 GB
-```
-
-The rule: **for any op `f(x)`, its backward allocates a tensor proportional to `x`**. `log_softmax` and `logsumexp` backward both require the full softmax distribution — same size as the input.
-
-## 4. No-grad and grad-tracked computations compete if run in the wrong order
-
-**Bad:** Policy forward runs first and stores ~40 GB of activations across 20 layers for backward. The ref model then tries to allocate ~17 GB of working memory on top — no room.
-
-```python
-policy_logits = model(combined_ids)              # stores 40 GB for backward
-ref_logits    = model.ref_forward(combined_ids)  # needs 17 GB working — OOM
-```
-
-**Better:** No-grad computations have transient working memory (freed immediately after the call). Grad-tracked computations have long-lived activation graphs. Run the no-grad pass first, while the GPU is relatively empty.
-
-```python
-ref_logits    = model.ref_forward(combined_ids)  # 17 GB peak, then fully freed
-ref_c_logps   = get_sequence_logprobs(...)
-del ref_logits
-
-policy_logits = model(combined_ids)  # now 40 GB activations accumulate uncontested
-```
-
-The rule: **no-grad before grad**. A backward-tracked forward pass holds its activation graph in memory until `loss.backward()` completes. Everything else you run in that window competes with it.

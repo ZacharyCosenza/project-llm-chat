@@ -3,11 +3,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoTokenizer
 from core.models import TinyGPT
+from core.reward import _extract_code_block, _run_code
 
 # --- Preset configuration ---
-# CHECKPOINT_PATH = '/home/zaccosenza/code/project-llm-chat/logs/4rgh0yll/checkpoints/checkpoint_81800.pt'
-CHECKPOINT_PATH = '/home/zaccosenza/code/project-llm-chat/logs/1oxgs1qn/checkpoints/checkpoint_81100.pt'
-# CHECKPOINT_PATH = '/home/zaccosenza/code/project-llm-chat/logs/7gfvtan7/checkpoints/checkpoint_81000.pt'
+CHECKPOINT_PATH = '/home/zaccosenza/code/project-llm-chat/logs/c9pt8niy/checkpoints/checkpoint_81940.pt'
 N_LAYERS = 20
 DIM = N_LAYERS * 64          # 1280
 N_HEADS = max(1, (DIM + 127) // 128)  # 10
@@ -17,7 +16,8 @@ TEMPERATURE = 0.8
 TOP_K = 40
 MAX_NEW_TOKENS = 300
 
-SYSTEM_PROMPT = 'You are a concise and helpful assistant. Your name is ZAC-GPT-2.'  # Optional default system prompt (empty = no system turn)
+EXEC_TIMEOUT = 5.0
+SYSTEM_PROMPT = 'You are a concise and helpful assistant.'  # Optional default system prompt (empty = no system turn)
 
 def _get_device():
     if torch.cuda.is_available():
@@ -147,6 +147,12 @@ def chat():
         response_toks = generated[:-1] if stop_tok is not None else generated
         response = tokenizer.decode(response_toks, skip_special_tokens=True).strip()
         print(f'Assistant: {response}\n')
+
+        code = _extract_code_block(response)
+        if code:
+            stdout, ok = _run_code(code, EXEC_TIMEOUT)
+            status = 'Output' if ok else 'Error'
+            print(f'{status}: {stdout}\n' if stdout else f'{status}: (no output)\n')
 
         # Extend context: assistant content + usr_id as turn separator.
         # The model emits usr_id when it finishes its turn (trained turn-end signal).

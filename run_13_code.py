@@ -1995,7 +1995,7 @@ def run(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch_size', type=int, default=9)
-    parser.add_argument('--max_steps', type=int, default=89200)
+    parser.add_argument('--max_steps', type=int, default=81900)
     parser.add_argument('--fast_dev_run', type=int, default=0)
     parser.add_argument('--resume', type=str, default=None)
     parser.add_argument('--mode', type=str, default='dpo', choices=[
